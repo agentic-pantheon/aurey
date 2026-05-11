@@ -35,3 +35,18 @@ class ScriptedHttpClient(HttpJsonPort):
             if matcher(method=method, url=url, headers=headers or {}, json_body=json_body):
                 return dict(response)
         raise AssertionError(f"No HTTP handler matched {method} {url}")
+
+
+class FailingHttpJsonClient(HttpJsonPort):
+    """Raises on every request without embedding URLs or headers in the message."""
+
+    def request_json(
+        self,
+        *,
+        method: str,
+        url: str,
+        headers: dict[str, str] | None = None,
+        json_body: dict[str, Any] | list[Any] | None = None,
+    ) -> dict[str, Any]:
+        _ = method, url, headers, json_body
+        raise RuntimeError("injected_http_transport_failure")

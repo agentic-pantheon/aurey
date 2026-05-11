@@ -1,0 +1,394 @@
+{
+  "alchemy_get_portfolio_tokens": {
+    "description": "Portfolio token holdings for a wallet.",
+    "properties": {
+      "chain": {
+        "minLength": 1,
+        "title": "Chain",
+        "type": "string"
+      },
+      "wallet_address": {
+        "minLength": 1,
+        "title": "Wallet Address",
+        "type": "string"
+      }
+    },
+    "required": [
+      "chain",
+      "wallet_address"
+    ],
+    "title": "AlchemyPortfolioArgs",
+    "type": "object"
+  },
+  "alchemy_get_token_prices": {
+    "description": "Token prices quoted by contract address.",
+    "properties": {
+      "chain": {
+        "minLength": 1,
+        "title": "Chain",
+        "type": "string"
+      },
+      "token_addresses": {
+        "items": {
+          "type": "string"
+        },
+        "minItems": 1,
+        "title": "Token Addresses",
+        "type": "array"
+      },
+      "wallet_address": {
+        "minLength": 1,
+        "title": "Wallet Address",
+        "type": "string"
+      }
+    },
+    "required": [
+      "chain",
+      "wallet_address",
+      "token_addresses"
+    ],
+    "title": "AlchemyTokenPricesArgs",
+    "type": "object"
+  },
+  "alchemy_get_transfer_history": {
+    "description": "Transfers via ``alchemy_getAssetTransfers``.",
+    "properties": {
+      "chain": {
+        "minLength": 1,
+        "title": "Chain",
+        "type": "string"
+      },
+      "wallet_address": {
+        "minLength": 1,
+        "title": "Wallet Address",
+        "type": "string"
+      }
+    },
+    "required": [
+      "chain",
+      "wallet_address"
+    ],
+    "title": "AlchemyTransferHistoryArgs",
+    "type": "object"
+  },
+  "evm_get_erc20_balance": {
+    "description": "ERC-20 balance read (Mercury-parity stub until full token address wiring).",
+    "properties": {
+      "chain": {
+        "minLength": 1,
+        "title": "Chain",
+        "type": "string"
+      },
+      "token_address": {
+        "minLength": 1,
+        "title": "Token Address",
+        "type": "string"
+      },
+      "wallet_address": {
+        "minLength": 1,
+        "title": "Wallet Address",
+        "type": "string"
+      }
+    },
+    "required": [
+      "chain",
+      "wallet_address",
+      "token_address"
+    ],
+    "title": "EvmGetErc20BalanceArgs",
+    "type": "object"
+  },
+  "evm_get_native_balance": {
+    "description": "Native gas-token balance via JSON-RPC (chain + wallet).",
+    "properties": {
+      "chain": {
+        "minLength": 1,
+        "title": "Chain",
+        "type": "string"
+      },
+      "wallet_address": {
+        "minLength": 1,
+        "title": "Wallet Address",
+        "type": "string"
+      }
+    },
+    "required": [
+      "chain",
+      "wallet_address"
+    ],
+    "title": "EvmGetNativeBalanceArgs",
+    "type": "object"
+  },
+  "request_user_input": {
+    "$defs": {
+      "UserQuestion": {
+        "description": "Single follow-up question for the user or host UI.",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Id"
+          },
+          "prompt": {
+            "minLength": 1,
+            "title": "Prompt",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "title": "UserQuestion",
+        "type": "object"
+      }
+    },
+    "properties": {
+      "questions": {
+        "items": {
+          "$ref": "#/$defs/UserQuestion"
+        },
+        "minItems": 1,
+        "title": "Questions",
+        "type": "array"
+      }
+    },
+    "required": [
+      "questions"
+    ],
+    "title": "RequestUserInputArgs",
+    "type": "object"
+  },
+  "resolve_known_address": {
+    "description": "Resolve a bundled ticker (e.g. USDC, WETH) to a contract address without RPC.",
+    "properties": {
+      "chain": {
+        "minLength": 1,
+        "title": "Chain",
+        "type": "string"
+      },
+      "known_ticker": {
+        "description": "Ticker key, e.g. usdc, weth.",
+        "minLength": 1,
+        "title": "Known Ticker",
+        "type": "string"
+      }
+    },
+    "required": [
+      "chain",
+      "known_ticker"
+    ],
+    "title": "ResolveKnownAddressArgs",
+    "type": "object"
+  },
+  "swap_prepare": {
+    "properties": {
+      "from_address": {
+        "minLength": 1,
+        "title": "From Address",
+        "type": "string"
+      },
+      "from_amount_wei": {
+        "minLength": 1,
+        "pattern": "^[0-9]+$",
+        "title": "From Amount Wei",
+        "type": "string"
+      },
+      "from_asset": {
+        "minLength": 1,
+        "title": "From Asset",
+        "type": "string"
+      },
+      "from_chain": {
+        "minLength": 1,
+        "title": "From Chain",
+        "type": "string"
+      },
+      "to_address": {
+        "minLength": 1,
+        "title": "To Address",
+        "type": "string"
+      },
+      "to_asset": {
+        "minLength": 1,
+        "title": "To Asset",
+        "type": "string"
+      },
+      "to_chain": {
+        "minLength": 1,
+        "title": "To Chain",
+        "type": "string"
+      }
+    },
+    "required": [
+      "from_chain",
+      "to_chain",
+      "from_asset",
+      "to_asset",
+      "from_amount_wei",
+      "from_address",
+      "to_address"
+    ],
+    "title": "SwapPrepareInput",
+    "type": "object"
+  },
+  "tx_execute": {
+    "description": "Simulate/policy/sign/broadcast for a typed prepare envelope.",
+    "properties": {
+      "envelope": {
+        "additionalProperties": true,
+        "title": "Envelope",
+        "type": "object"
+      },
+      "idempotency_key": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Idempotency Key"
+      }
+    },
+    "required": [
+      "envelope"
+    ],
+    "title": "TxExecuteToolArgs",
+    "type": "object"
+  },
+  "tx_prepare_erc20_approval": {
+    "properties": {
+      "amount_wei": {
+        "minimum": 0,
+        "title": "Amount Wei",
+        "type": "integer"
+      },
+      "chain": {
+        "minLength": 1,
+        "title": "Chain",
+        "type": "string"
+      },
+      "from_address": {
+        "minLength": 1,
+        "title": "From Address",
+        "type": "string"
+      },
+      "kind": {
+        "const": "erc20_approval",
+        "default": "erc20_approval",
+        "title": "Kind",
+        "type": "string"
+      },
+      "spender_address": {
+        "minLength": 1,
+        "title": "Spender Address",
+        "type": "string"
+      },
+      "token_address": {
+        "minLength": 1,
+        "title": "Token Address",
+        "type": "string"
+      }
+    },
+    "required": [
+      "chain",
+      "from_address",
+      "token_address",
+      "spender_address",
+      "amount_wei"
+    ],
+    "title": "TxPrepareErc20Approval",
+    "type": "object"
+  },
+  "tx_prepare_erc20_transfer": {
+    "properties": {
+      "amount_wei": {
+        "minimum": 0,
+        "title": "Amount Wei",
+        "type": "integer"
+      },
+      "chain": {
+        "minLength": 1,
+        "title": "Chain",
+        "type": "string"
+      },
+      "from_address": {
+        "minLength": 1,
+        "title": "From Address",
+        "type": "string"
+      },
+      "kind": {
+        "const": "erc20_transfer",
+        "default": "erc20_transfer",
+        "title": "Kind",
+        "type": "string"
+      },
+      "to_address": {
+        "minLength": 1,
+        "title": "To Address",
+        "type": "string"
+      },
+      "token_address": {
+        "minLength": 1,
+        "title": "Token Address",
+        "type": "string"
+      }
+    },
+    "required": [
+      "chain",
+      "from_address",
+      "token_address",
+      "to_address",
+      "amount_wei"
+    ],
+    "title": "TxPrepareErc20Transfer",
+    "type": "object"
+  },
+  "tx_prepare_native_transfer": {
+    "properties": {
+      "chain": {
+        "minLength": 1,
+        "title": "Chain",
+        "type": "string"
+      },
+      "from_address": {
+        "minLength": 1,
+        "title": "From Address",
+        "type": "string"
+      },
+      "kind": {
+        "const": "native_transfer",
+        "default": "native_transfer",
+        "title": "Kind",
+        "type": "string"
+      },
+      "to_address": {
+        "minLength": 1,
+        "title": "To Address",
+        "type": "string"
+      },
+      "value_wei": {
+        "minimum": 0,
+        "title": "Value Wei",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "chain",
+      "from_address",
+      "to_address",
+      "value_wei"
+    ],
+    "title": "TxPrepareNative",
+    "type": "object"
+  }
+}
