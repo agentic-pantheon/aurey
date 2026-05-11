@@ -140,6 +140,29 @@
     "title": "EvmGetNativeBalanceArgs",
     "type": "object"
   },
+  "evm_resolve_ens": {
+    "description": "Resolve an ENS name to an Ethereum checksum-normalized hex address.",
+    "properties": {
+      "chain": {
+        "default": "ethereum",
+        "description": "Must be 'ethereum'. ENS forward resolution is only defined on L1 mainnet.",
+        "minLength": 1,
+        "title": "Chain",
+        "type": "string"
+      },
+      "name": {
+        "description": "ENS name such as nick.eth (trimmed and lower-cased by the tool).",
+        "minLength": 1,
+        "title": "Name",
+        "type": "string"
+      }
+    },
+    "required": [
+      "name"
+    ],
+    "title": "EvmResolveEnsArgs",
+    "type": "object"
+  },
   "request_user_input": {
     "$defs": {
       "UserQuestion": {
@@ -222,6 +245,7 @@
         "type": "string"
       },
       "from_asset": {
+        "description": "Token contract (0x\u2026) or symbol as accepted by LiFi ``fromToken``.",
         "minLength": 1,
         "title": "From Asset",
         "type": "string"
@@ -231,12 +255,45 @@
         "title": "From Chain",
         "type": "string"
       },
+      "order": {
+        "anyOf": [
+          {
+            "enum": [
+              "FASTEST",
+              "CHEAPEST"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "LiFi route preference; omit for LiFi default sorting.",
+        "title": "Order"
+      },
+      "slippage": {
+        "anyOf": [
+          {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "Max slippage as decimal (e.g. 0.005 = 0.5%%). Omit for LiFi default.",
+        "title": "Slippage"
+      },
       "to_address": {
         "minLength": 1,
         "title": "To Address",
         "type": "string"
       },
       "to_asset": {
+        "description": "Token contract (0x\u2026) or symbol as accepted by LiFi ``toToken``.",
         "minLength": 1,
         "title": "To Asset",
         "type": "string"
@@ -366,6 +423,68 @@
       "amount_wei"
     ],
     "title": "TxPrepareErc20TransferArgs",
+    "type": "object"
+  },
+  "tx_prepare_lifi_swap": {
+    "description": "Build from ``swap_prepare`` output: nested ``prepared`` or flat ``route_id`` + tx request.",
+    "properties": {
+      "chain": {
+        "minLength": 1,
+        "title": "Chain",
+        "type": "string"
+      },
+      "from_address": {
+        "minLength": 1,
+        "title": "From Address",
+        "type": "string"
+      },
+      "prepared": {
+        "anyOf": [
+          {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "Preferred: exact `prepared` from `swap_prepare` (`route_id` + `transaction_request`).",
+        "title": "Prepared"
+      },
+      "route_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "Alternative when `prepared` is awkward for the caller: LiFi step id string.",
+        "title": "Route Id"
+      },
+      "transaction_request": {
+        "anyOf": [
+          {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "LiFi transactionRequest dict; pair with `route_id` if no `prepared`.",
+        "title": "Transaction Request"
+      }
+    },
+    "required": [
+      "chain",
+      "from_address"
+    ],
+    "title": "TxPrepareLiFiInput",
     "type": "object"
   },
   "tx_prepare_native_transfer": {

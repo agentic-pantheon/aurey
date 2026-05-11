@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -15,6 +16,7 @@ from aurey.custody.secret_store import SecretStore
 from aurey.graphs.chains import alchemy_rpc_url_for_chain, chain_name_for_id
 from aurey.graphs.ports import TxPipelinePort
 from aurey.graphs.results import PreparedTxEnvelope, TxExecuteResult, TxReceiptSummary
+from aurey.graphs.swap_diag import SWAP_LOG, addr_short
 from aurey.settings import AureySettings
 
 _PRIVATE_KEY_HEX = re.compile(r"^(?:0x)?[a-fA-F0-9]{64}$")
@@ -34,6 +36,14 @@ def _simulation_failed(
                 " Hint: amount must be in the token's smallest units. USDC uses 6 decimals "
                 "(0.01 USDC = 10_000 raw, not 10**16). Using ether-style 1e18 scaling on USDC "
                 "mints a huge transfer and reverts with 'exceeds balance'."
+            )
+    elif envelope.kind == "lifi_swap":
+        low = str(exc).lower()
+        if "revert" in low or "execution reverted" in low:
+            msg += (
+                " Hint: For ERC-20 sells, ensure allowance: call swap_prepare and use "
+                "`allowance` → tx_prepare_erc20_approval → tx_execute, then run the swap tx "
+                "(refresh quote if the first swap simulation fails after approval)."
             )
     return RuntimeError(msg)
 
@@ -71,6 +81,30 @@ class Web3TxPipeline(TxPipelinePort):
         if signer.address.lower() != envelope.from_address.lower():
             raise RuntimeError("policy_rejected: signing key does not match from_address.")
 
+        t_pipe = time.perf_counter()
+
+        def _mark(stage: str, **kw: Any) -> None:
+            if envelope.kind != "lifi_swap":
+                return
+            tail = ("  " + "  ".join(f"{k}={v}" for k, v in sorted(kw.items()))) if kw else ""
+            SWAP_LOG.info(
+                "lifi_pipeline stage=%s elapsed_ms=%.1f chain_id=%s from=%s to=%s%s",
+                stage,
+                (time.perf_counter() - t_pipe) * 1000,
+                envelope.chain_id,
+                addr_short(envelope.from_address),
+                addr_short(envelope.to),
+                tail,
+            )
+
+        if envelope.kind == "lifi_swap":
+            SWAP_LOG.info(
+                "lifi_pipeline run_prepared begin chain_id=%s from=%s to=%s",
+                envelope.chain_id,
+                addr_short(envelope.from_address),
+                addr_short(envelope.to),
+            )
+
         alchemy_path = (self._settings.alchemy_api_secret_path or "").strip()
         if not alchemy_path:
             raise RuntimeError(
@@ -89,6 +123,8 @@ class Web3TxPipeline(TxPipelinePort):
         if not api_key:
             raise RuntimeError("policy_rejected: Alchemy API key is empty.")
 
+        _mark("alchemy_key_ready")
+
         chain_name = chain_name_for_id(envelope.chain_id)
         if chain_name is None:
             raise RuntimeError("policy_rejected: unsupported chain_id for transaction execution.")
@@ -101,6 +137,8 @@ class Web3TxPipeline(TxPipelinePort):
 
         if int(w3.eth.chain_id) != envelope.chain_id:
             raise RuntimeError("simulation_failed: RPC chain id does not match envelope.")
+
+        _mark("web3_connected")
 
         from_cs = Web3.to_checksum_address(envelope.from_address)
         to_cs = Web3.to_checksum_address(envelope.to)
@@ -129,6 +167,8 @@ class Web3TxPipeline(TxPipelinePort):
             except Exception as exc:
                 raise _simulation_failed(envelope, exc, step="gas estimation failed") from exc
 
+        _mark("gas_ready", gas_limit=gas_limit)
+
         fee_fields = _tx_fee_fields(w3)
         tx_body: dict[str, Any] = {**base, "gas": gas_limit, **fee_fields}
 
@@ -145,10 +185,14 @@ class Web3TxPipeline(TxPipelinePort):
         except Exception as exc:
             raise _simulation_failed(envelope, exc, step="eth_call simulation failed") from exc
 
+        _mark("simulation_ok")
+
         try:
             signed = Account.sign_transaction(tx_body, key_hex)
         except Exception as exc:
             raise RuntimeError(f"policy_rejected: transaction signing failed ({exc}).") from exc
+
+        _mark("signed")
 
         raw = signed.raw_transaction
         raw_bytes = raw if isinstance(raw, (bytes, bytearray)) else bytes(raw)
@@ -159,7 +203,15 @@ class Web3TxPipeline(TxPipelinePort):
             raise RuntimeError(f"broadcast_failed: {exc}") from exc
 
         tx_hash_hex = Web3.to_hex(tx_hash)
+        _mark("broadcast_submitted", tx_hash=tx_hash_hex)
+
         receipt = _wait_receipt(w3, tx_hash, self._receipt_timeout_s)
+        _mark(
+            "receipt_done",
+            status=receipt.status,
+            block=receipt.block_number,
+            gas_used=receipt.gas_used,
+        )
 
         return TxExecuteResult(
             tx_hash=tx_hash_hex,

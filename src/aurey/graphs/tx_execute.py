@@ -93,7 +93,8 @@ def _execute_node(runtime: AureyRuntime, state: TxExecuteGraphState) -> TxExecut
         return {
             "error": GraphErrorBody(
                 code=code,
-                message="Transaction pipeline failed.",
+                message=message,
+                details=None,
             ).model_dump()
         }
 

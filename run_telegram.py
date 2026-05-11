@@ -11,6 +11,8 @@ import logging
 
 from aurey.logging_setup import configure_aurey_console_logging
 
+_log = logging.getLogger("aurey.telegram.runner")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Aurey Telegram + Rich console logs")
@@ -26,7 +28,12 @@ def main() -> None:
 
     from aurey.telegram import create_telegram_application
 
-    create_telegram_application().run_polling()
+    _log.info("Building Telegram application …")
+    app = create_telegram_application()
+    _log.info(
+        "Starting long polling (Ctrl+C to stop). Per-message traces use logger aurey.turn."
+    )
+    app.run_polling()
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ def test_settings_defaults():
     assert s.oneclaw_agent_id is None
     assert s.alchemy_api_secret_path is None
     assert s.lifi_api_secret_path is None
+    assert s.lifi_integrator == "aurey"
     assert s.wallet_signing_key_secret_path is None
     assert s.telegram_bot_token_secret_path is None
     assert s.deep_agent_default_model == "openai:gpt-4o-mini"

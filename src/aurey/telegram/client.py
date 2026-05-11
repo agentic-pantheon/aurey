@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import re
 from typing import Any
@@ -20,6 +21,7 @@ class TelegramConfigurationError(RuntimeError):
 
 _TELEGRAM_MAX_MESSAGE_CHARS = 4096
 _TELEGRAM_CHUNK_TARGET_CHARS = 3600
+_TELEGRAM_TYPING_REFRESH_SEC = 4.0
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 
@@ -119,8 +121,11 @@ def resolve_telegram_bot_token(state: AureyServiceState) -> str:
     except SecretNotFoundError as exc:
         raise TelegramConfigurationError("Telegram bot token could not be resolved.") from exc
     except SecretStoreUnavailableError as exc:
-        raise TelegramConfigurationError("Secret store unavailable for Telegram token.") from exc
-
+        raise TelegramConfigurationError(
+            f"Secret store unavailable for Telegram token at path {path!r}. "
+            "If this path is correct, the failure may be 1Claw agent authentication "
+            "(POST /v1/auth/agent-token) rather than the Telegram secret; see chained error."
+        ) from exc
 
 def _last_text_message(result: AgentInvokeResult) -> str:
     text = reply_preview_from_summary(result.messages)
@@ -183,6 +188,27 @@ def build_telegram_application(
         filters,
     ) = _import_telegram_ext()
     bot_token = token or resolve_telegram_bot_token(state)
+    from telegram.constants import ChatAction
+
+    async def _pump_typing_chat_action(
+        *,
+        bot: Any,
+        chat_id: int,
+        done: asyncio.Event,
+    ) -> None:
+        """Refresh ``typing``; Telegram clears it after a few seconds."""
+
+        while not done.is_set():
+            try:
+                await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+            except Exception:
+                pass
+            if done.is_set():
+                break
+            try:
+                await asyncio.wait_for(done.wait(), timeout=_TELEGRAM_TYPING_REFRESH_SEC)
+            except TimeoutError:
+                pass
 
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         _ = context
@@ -192,19 +218,40 @@ def build_telegram_application(
             )
 
     async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        _ = context
         msg = update.effective_message
         if msg is None or not msg.text:
             return
         chat = update.effective_chat
         user = update.effective_user
-        reply = handle_telegram_text(
-            state,
-            chat_id=getattr(chat, "id", "unknown"),
-            user_id=getattr(user, "id", None),
-            text=msg.text,
-            model=model,
-        )
+        chat_id_raw = getattr(chat, "id", None)
+        chat_id_for_session = chat_id_raw if chat_id_raw is not None else "unknown"
+
+        done = asyncio.Event()
+
+        async def typing_or_wait() -> None:
+            if chat_id_raw is None:
+                await done.wait()
+                return
+            await _pump_typing_chat_action(
+                bot=context.bot,
+                chat_id=int(chat_id_raw),
+                done=done,
+            )
+
+        typing_task = asyncio.create_task(typing_or_wait())
+        try:
+            reply = await asyncio.to_thread(
+                handle_telegram_text,
+                state,
+                chat_id=chat_id_for_session,
+                user_id=getattr(user, "id", None),
+                text=msg.text,
+                model=model,
+            )
+        finally:
+            done.set()
+            await typing_task
+
         for chunk in telegram_message_chunks(reply):
             await msg.reply_text(
                 format_telegram_message(chunk),

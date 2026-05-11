@@ -9,6 +9,15 @@ from pydantic import BaseModel, Field, ValidationError
 
 from aurey.custody.errors import SecretNotFoundError, SecretStoreUnavailableError
 from aurey.graphs.chains import alchemy_rpc_url_for_chain, chain_id_for, chain_info
+from aurey.graphs.ens_eth import (
+    ENS_REGISTRY_MAINNET,
+    decode_abi_address_word,
+    ens_addr_calldata,
+    ens_namehash,
+    ens_resolver_calldata,
+    is_zero_address,
+    normalize_ens_query_name,
+)
 from aurey.graphs.evm_codec import (
     ERC20_DECIMALS_CALLDATA,
     decode_abi_uint256_word,
@@ -17,6 +26,7 @@ from aurey.graphs.evm_codec import (
     parse_evm_uint,
 )
 from aurey.graphs.results import (
+    EnsResolveResult,
     Erc20DecimalsResult,
     Erc20ReadPlaceholder,
     GraphErrorBody,
@@ -28,11 +38,18 @@ from aurey.runtime import AureyRuntime
 
 
 class ReadGraphInput(BaseModel):
-    operation: Literal["native_balance", "known_address", "erc20_balance", "erc20_decimals"]
+    operation: Literal[
+        "native_balance",
+        "known_address",
+        "erc20_balance",
+        "erc20_decimals",
+        "ens_resolve",
+    ]
     chain: str = Field(min_length=1)
     wallet_address: str | None = None
     token_address: str | None = None
     known_ticker: str | None = None
+    ens_name: str | None = None
 
 
 def _alchemy_rpc_or_error(
@@ -97,6 +114,26 @@ def _validate_node(state: ReadGraphState) -> ReadGraphState:
         return {"error": _validation_error(exc)}
 
     chain = parsed.chain
+    chain_key = chain.strip().lower()
+
+    if parsed.operation == "ens_resolve":
+        if not parsed.ens_name or not str(parsed.ens_name).strip():
+            return {
+                "error": GraphErrorBody(
+                    code="invalid_input",
+                    message="ens_name is required for ens_resolve.",
+                ).model_dump()
+            }
+        if chain_key != "ethereum":
+            return {
+                "error": GraphErrorBody(
+                    code="unsupported_chain",
+                    message="ENS can only be resolved on ethereum mainnet.",
+                    details={"chain": parsed.chain.strip()},
+                ).model_dump()
+            }
+        return {}
+
     if chain_info(chain) is None:
         return {
             "error": GraphErrorBody(
@@ -178,6 +215,88 @@ def _execute_node(runtime: AureyRuntime, state: ReadGraphState) -> ReadGraphStat
 
     parsed = ReadGraphInput.model_validate(state["input"])
     chain = parsed.chain.strip().lower()
+
+    if parsed.operation == "ens_resolve":
+        rpc, err_body = _alchemy_rpc_or_error(runtime, chain)
+        if err_body is not None:
+            return {"error": err_body}
+        name = normalize_ens_query_name(parsed.ens_name or "")
+        if not name:
+            return {
+                "error": GraphErrorBody(
+                    code="invalid_input",
+                    message="ENS name is empty.",
+                ).model_dump()
+            }
+        try:
+            node = ens_namehash(name)
+        except ValueError as exc:
+            return {
+                "error": GraphErrorBody(
+                    code="invalid_input",
+                    message="Invalid ENS name.",
+                    details={"reason": str(exc)},
+                ).model_dump()
+            }
+        try:
+            resolver_raw = rpc.call(
+                "eth_call",
+                [
+                    {"to": ENS_REGISTRY_MAINNET, "data": ens_resolver_calldata(node)},
+                    "latest",
+                ],
+            )
+            if not isinstance(resolver_raw, str):
+                raise TypeError("unexpected eth_call result type")
+            resolver_addr = decode_abi_address_word(resolver_raw)
+        except Exception:
+            return {
+                "error": GraphErrorBody(
+                    code="rpc_error",
+                    message="ENS registry resolver(bytes32) eth_call failed.",
+                ).model_dump()
+            }
+
+        if is_zero_address(resolver_addr):
+            return {
+                "error": GraphErrorBody(
+                    code="ens_not_found",
+                    message="No resolver is set for this ENS name.",
+                    details={"name": name},
+                ).model_dump()
+            }
+
+        try:
+            addr_raw = rpc.call(
+                "eth_call",
+                [
+                    {"to": resolver_addr, "data": ens_addr_calldata(node)},
+                    "latest",
+                ],
+            )
+            if not isinstance(addr_raw, str):
+                raise TypeError("unexpected eth_call result type")
+            resolved = decode_abi_address_word(addr_raw)
+        except Exception:
+            return {
+                "error": GraphErrorBody(
+                    code="rpc_error",
+                    message="ENS resolver addr(bytes32) eth_call failed.",
+                    details={"resolver": resolver_addr},
+                ).model_dump()
+            }
+
+        if is_zero_address(resolved):
+            return {
+                "error": GraphErrorBody(
+                    code="ens_not_found",
+                    message="ENS name does not resolve to an Ethereum address.",
+                    details={"name": name},
+                ).model_dump()
+            }
+
+        out = EnsResolveResult(name=name, resolved_address=resolved)
+        return {"result": out.model_dump()}
 
     if parsed.operation == "known_address":
         ticker = parsed.known_ticker or ""

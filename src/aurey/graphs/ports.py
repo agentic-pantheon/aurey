@@ -7,6 +7,28 @@ from typing import Any, Protocol, runtime_checkable
 from aurey.graphs.results import PreparedTxEnvelope, TxExecuteResult
 
 
+class HttpJsonRequestError(RuntimeError):
+    """Non-2xx HTTP response with optional JSON body (e.g. LiFi ``message`` / ``code``)."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        body_text: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.body_text = body_text
+        self.payload = payload
+        msg = f"HTTP {status_code}"
+        if isinstance(payload, dict):
+            if "message" in payload:
+                msg = f"{msg}: {payload['message']}"
+        elif body_text:
+            msg = f"{msg}: {body_text[:500]}"
+        super().__init__(msg)
+
+
 @runtime_checkable
 class EvmJsonRpcPort(Protocol):
     """Minimal JSON-RPC surface used by read/prepare flows."""

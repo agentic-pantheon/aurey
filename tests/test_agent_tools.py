@@ -88,12 +88,14 @@ def test_tool_schemas_include_expected_names_and_descriptions():
     expected = {
         "evm_get_native_balance",
         "evm_get_erc20_decimals",
+        "evm_resolve_ens",
         "resolve_known_address",
         "evm_get_erc20_balance",
         "alchemy_get_token_prices",
         "alchemy_get_portfolio_tokens",
         "alchemy_get_transfer_history",
         "swap_prepare",
+        "tx_prepare_lifi_swap",
         "tx_prepare_native_transfer",
         "tx_prepare_erc20_transfer",
         "tx_prepare_erc20_approval",
@@ -351,6 +353,39 @@ def test_tx_execute_tool_accepts_tx_execute_shape():
     TxExecuteInput.model_validate({"envelope": env})
     tool = _tool_by_name(build_aurey_subgraph_tools(runtime), "tx_execute")
     out = tool.invoke({"envelope": env})
+    assert out["ok"] is True
+    assert out["result"]["tx_hash"].startswith("0x")
+    _assert_no_banned_values(out)
+
+
+def test_tx_execute_tool_coerces_mistaken_lifi_prepared_blob():
+    """Models sometimes pass ``swap_prepare`` ``prepared`` to ``tx_execute``; repair that path."""
+
+    signing_path = "vault/signing/local"
+    wallet = "0xc1923710468607b8b7db38a6afbb9b432744390c"
+    secrets = {signing_path: "0x" + "ff" * 32}
+    settings = AureySettings(wallet_signing_key_secret_path=signing_path)
+    runtime = AureyRuntime(
+        settings=settings,
+        secret_store=FakeSecretStore(secrets),
+        evm_rpc_factory=rpc_factory_from_mapping({}),
+        http=ScriptedHttpClient(),
+        tx_pipeline=DeterministicTxPipeline(),
+        lifi_base_url="https://li.quest",
+    )
+    mistaken = {
+        "route_id": "dfc10047-da37-4954-bcea-48a218182a87:0",
+        "transaction_request": {
+            "value": "0x0",
+            "to": "0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae",
+            "data": "0x",
+            "chainId": 8453,
+            "gasLimit": "0xff6c6",
+            "from": wallet,
+        },
+    }
+    tool = _tool_by_name(build_aurey_subgraph_tools(runtime), "tx_execute")
+    out = tool.invoke({"envelope": mistaken})
     assert out["ok"] is True
     assert out["result"]["tx_hash"].startswith("0x")
     _assert_no_banned_values(out)

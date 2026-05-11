@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 GraphErrorCode = Literal[
     "needs_approval",
+    "ens_not_found",
     "unsupported_chain",
     "simulation_failed",
     "secret_not_configured",
@@ -50,6 +51,17 @@ class KnownAddressResult(BaseModel):
     chain: str
     ticker: str
     symbol: str
+    name: str
+    resolved_address: str
+
+
+class EnsResolveResult(BaseModel):
+    """Forward ENS lookup on Ethereum L1 via registry + resolver ``addr(bytes32)``."""
+
+    model_config = ConfigDict(frozen=True)
+
+    chain: Literal["ethereum"] = "ethereum"
+    chain_id: int = 1
     name: str
     resolved_address: str
 
@@ -99,10 +111,25 @@ class AlchemyTransferHistoryResult(BaseModel):
 
 
 class LiFiPreparedTx(BaseModel):
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    route_id: str = Field(validation_alias=AliasChoices("route_id", "routeId", "id"))
+    transaction_request: dict[str, Any] = Field(
+        validation_alias=AliasChoices("transaction_request", "transactionRequest"),
+    )
+
+
+class LiFiAllowanceHint(BaseModel):
+    """ERC-20 approval LiFi expects before the swap tx can succeed on-chain."""
+
     model_config = ConfigDict(frozen=True)
 
-    route_id: str
-    transaction_request: dict[str, Any]
+    token_address: str
+    spender_address: str
+    amount_raw: str = Field(
+        description="Minimum approval amount in raw token units (same as swap fromAmount).",
+        pattern=r"^[0-9]+$",
+    )
 
 
 class SwapPrepareResult(BaseModel):
@@ -110,9 +137,10 @@ class SwapPrepareResult(BaseModel):
 
     provider: Literal["lifi"] = "lifi"
     prepared: LiFiPreparedTx
+    allowance: LiFiAllowanceHint | None = None
 
 
-TxKind = Literal["native_transfer", "erc20_transfer", "erc20_approval"]
+TxKind = Literal["native_transfer", "erc20_transfer", "erc20_approval", "lifi_swap"]
 
 
 class PreparedTxEnvelope(BaseModel):

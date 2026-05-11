@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+from typing import Any
+
+import ormsgpack
 
 from aurey.custody import FakeSecretStore
 from aurey.graphs import (
@@ -12,18 +15,43 @@ from aurey.graphs import (
     build_swap_prepare_graph,
     build_tx_execute_graph,
     build_tx_prepare_graph,
+    build_tx_prepare_lifi_graph,
 )
+from aurey.graphs.ens_eth import (
+    ENS_REGISTRY_MAINNET,
+    ens_addr_calldata,
+    ens_namehash,
+    ens_resolver_calldata,
+)
+from aurey.graphs.ports import HttpJsonPort, HttpJsonRequestError
 from aurey.runtime import AureyRuntime
 from aurey.settings import AureySettings
 from tests.fakes.evm_rpc import rpc_factory_from_mapping
 from tests.fakes.http_client import ScriptedHttpClient
 
 
+class _LifiUnauthorizedHttp(HttpJsonPort):
+    def request_json(
+        self,
+        *,
+        method: str,
+        url: str,
+        headers: dict[str, str] | None = None,
+        json_body: dict[str, Any] | list[Any] | None = None,
+    ) -> dict[str, Any]:
+        _ = method, url, headers, json_body
+        raise HttpJsonRequestError(
+            status_code=401,
+            body_text='{"message":"Invalid API key","code":1010}',
+            payload={"message": "Invalid API key", "code": 1010},
+        )
+
+
 def _runtime(
     *,
     secrets: dict[str, str],
     settings: AureySettings,
-    http: ScriptedHttpClient,
+    http: HttpJsonPort,
     rpc_map: dict[str, object],
 ) -> AureyRuntime:
     return AureyRuntime(
@@ -137,6 +165,118 @@ def test_read_erc20_decimals_graph():
     assert out["result"]["chain_id"] == 8453
     assert out["result"]["token_address"] == tok.lower()
     _assert_no_banned_values(out)
+
+
+def test_read_ens_resolve_graph():
+    alchemy_path = "vault/alchemy/y"
+    secrets = {alchemy_path: "INJECTED_ALCHEMY_KEY_AAA"}
+    settings = AureySettings(alchemy_api_secret_path=alchemy_path)
+
+    ens_name = "foo.eth"
+    node = ens_namehash(ens_name)
+    resolver_addr = "0x2222222222222222222222222222222222222222"
+    resolved_wallet = "0xd8da6bf26964af9d7eed9e03e53415d37aa96045"
+    padded_resolver = "0x" + "0" * 24 + resolver_addr[2:]
+    padded_wallet = "0x" + "0" * 24 + resolved_wallet[2:]
+    expected_registry = ENS_REGISTRY_MAINNET.lower()
+    resolver_l = resolver_addr.lower()
+
+    def eth_call(params: list) -> str:
+        body = params[0]
+        to_l = body["to"].lower()
+        data = body["data"].lower()
+        if to_l == expected_registry:
+            assert data == ens_resolver_calldata(node).lower()
+            return padded_resolver
+        if to_l == resolver_l:
+            assert data == ens_addr_calldata(node).lower()
+            return padded_wallet
+        raise AssertionError((to_l, data[:10]))
+
+    runtime = AureyRuntime(
+        settings=settings,
+        secret_store=FakeSecretStore(secrets),
+        evm_rpc_factory=rpc_factory_from_mapping({"eth_call": eth_call}),
+        http=ScriptedHttpClient(),
+        tx_pipeline=DeterministicTxPipeline(),
+        lifi_base_url="https://li.quest",
+    )
+    graph = build_read_graph(runtime)
+    out = graph.invoke(
+        {
+            "input": {
+                "operation": "ens_resolve",
+                "chain": "ethereum",
+                "ens_name": "  FOO.ETH ",
+            },
+        }
+    )
+    assert out.get("error") is None
+    assert out["result"]["name"] == ens_name
+    assert out["result"]["resolved_address"] == resolved_wallet.lower()
+    assert out["result"]["chain"] == "ethereum"
+    assert out["result"]["chain_id"] == 1
+    _assert_no_banned_values(out)
+
+
+def test_read_ens_resolve_unsupported_chain():
+    alchemy_path = "vault/alchemy/z"
+    secrets = {alchemy_path: "INJECTED_ALCHEMY_KEY_AAA"}
+    settings = AureySettings(alchemy_api_secret_path=alchemy_path)
+    runtime = AureyRuntime(
+        settings=settings,
+        secret_store=FakeSecretStore(secrets),
+        evm_rpc_factory=rpc_factory_from_mapping({}),
+        http=ScriptedHttpClient(),
+        tx_pipeline=DeterministicTxPipeline(),
+        lifi_base_url="https://li.quest",
+    )
+    graph = build_read_graph(runtime)
+    out = graph.invoke(
+        {
+            "input": {
+                "operation": "ens_resolve",
+                "chain": "base",
+                "ens_name": "x.eth",
+            },
+        }
+    )
+    assert out.get("result") is None
+    assert out["error"]["code"] == "unsupported_chain"
+
+
+def test_read_ens_resolve_no_resolver_returns_ens_not_found():
+    alchemy_path = "vault/alchemy/nf"
+    secrets = {alchemy_path: "INJECTED_ALCHEMY_KEY_AAA"}
+    settings = AureySettings(alchemy_api_secret_path=alchemy_path)
+    padded_zero = "0x" + "0" * 64
+
+    def eth_call(params: list) -> str:
+        body = params[0]
+        assert body["to"].lower() == ENS_REGISTRY_MAINNET.lower()
+        assert body["data"].lower().startswith("0x0178b8bf")
+        assert params[1] == "latest"
+        return padded_zero
+
+    runtime = AureyRuntime(
+        settings=settings,
+        secret_store=FakeSecretStore(secrets),
+        evm_rpc_factory=rpc_factory_from_mapping({"eth_call": eth_call}),
+        http=ScriptedHttpClient(),
+        tx_pipeline=DeterministicTxPipeline(),
+        lifi_base_url="https://li.quest",
+    )
+    graph = build_read_graph(runtime)
+    out = graph.invoke(
+        {
+            "input": {
+                "operation": "ens_resolve",
+                "chain": "Ethereum",
+                "ens_name": "does-not-exist-12345.eth",
+            },
+        }
+    )
+    assert out["error"]["code"] == "ens_not_found"
 
 
 def test_read_known_address_graph():
@@ -284,7 +424,18 @@ def test_alchemy_portfolio_and_transfers_graphs():
                                     "symbol": "USDC",
                                     "name": "USD Coin",
                                 },
-                            }
+                            },
+                            {
+                                "address": wallet,
+                                "network": "base-mainnet",
+                                "tokenAddress": "0x3333333333333333333333333333333333333333",
+                                "tokenBalance": hex(2**63),
+                                "tokenMetadata": {
+                                    "decimals": 18,
+                                    "symbol": "HUGE",
+                                    "name": "Int64 overflow balance fixture",
+                                },
+                            },
                         ]
                     }
                 },
@@ -311,12 +462,15 @@ def test_alchemy_portfolio_and_transfers_graphs():
         }
     )
     assert portfolio["result"]["tokens"][0]["tokenMetadata"]["symbol"] == "ETH"
-    assert portfolio["result"]["tokens"][0]["balance_raw"] == 1000000000000000000
+    assert portfolio["result"]["tokens"][0]["balance_raw"] == "1000000000000000000"
     assert portfolio["result"]["tokens"][0]["decimals"] == 18
     assert portfolio["result"]["tokens"][0]["balance_decimal"] == "1"
-    assert portfolio["result"]["tokens"][1]["balance_raw"] == 62825
+    assert portfolio["result"]["tokens"][1]["balance_raw"] == "62825"
     assert portfolio["result"]["tokens"][1]["decimals"] == 6
     assert portfolio["result"]["tokens"][1]["balance_decimal"] == "0.062825"
+    assert portfolio["result"]["tokens"][2]["balance_raw"] == str(2**63)
+    assert portfolio["result"]["tokens"][2]["decimals"] == 18
+    ormsgpack.packb(portfolio["result"])
     _assert_no_banned_values(portfolio)
 
     transfers = build_alchemy_graph(runtime).invoke(
@@ -339,11 +493,16 @@ def test_swap_prepare_graph():
 
     def match_quote(**kw: object) -> bool:
         headers = kw.get("headers") or {}
+        u = str(kw.get("url") or "")
         return (
-            kw.get("method") == "POST"
-            and "li.quest" in str(kw.get("url") or "")
+            kw.get("method") == "GET"
+            and "li.quest" in u
+            and "/v1/quote?" in u
+            and "fromChain=1" in u
+            and "toChain=8453" in u
             and isinstance(headers, dict)
-            and headers.get("X-API-KEY") == "INJECTED_LIFI_KEY_BBB"
+            and headers.get("x-lifi-api-key") == "INJECTED_LIFI_KEY_BBB"
+            and "integrator=aurey" in u
         )
 
     http = ScriptedHttpClient(
@@ -351,7 +510,16 @@ def test_swap_prepare_graph():
             (
                 match_quote,
                 {
-                    "routeId": "swap-route-1",
+                    "id": "swap-route-1",
+                    "estimate": {
+                        "approvalAddress": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    },
+                    "action": {
+                        "fromAmount": "1000000",
+                        "fromToken": {
+                            "address": "0x1111111111111111111111111111111111111111",
+                        },
+                    },
                     "transactionRequest": {
                         "to": "0x3333333333333333333333333333333333333333",
                         "data": "0x",
@@ -380,7 +548,346 @@ def test_swap_prepare_graph():
         }
     )
     assert out["result"]["prepared"]["route_id"] == "swap-route-1"
+    al = out["result"]["allowance"]
+    assert al is not None
+    assert al["token_address"] == "0x1111111111111111111111111111111111111111"
+    assert al["spender_address"] == "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    assert al["amount_raw"] == "1000000"
     _assert_no_banned_values(out)
+
+
+def test_swap_prepare_graph_quote_url_includes_slippage_order_integrator():
+    """LiFi GET /v1/quote query matches OpenAPI-style integrator, slippage, order."""
+
+    secrets = {"vault/lifi": "INJECTED_LIFI_KEY_BBB"}
+    settings = AureySettings(lifi_api_secret_path="vault/lifi")
+    urls: list[str] = []
+
+    def match_quote(**kw: object) -> bool:
+        urls.append(str(kw.get("url") or ""))
+        return kw.get("method") == "GET" and "/v1/quote?" in str(kw.get("url") or "")
+
+    http = ScriptedHttpClient(
+        [
+            (
+                match_quote,
+                {
+                    "id": "q-slippage",
+                    "transactionRequest": {
+                        "to": "0x3333333333333333333333333333333333333333",
+                        "data": "0x",
+                    },
+                },
+            )
+        ]
+    )
+    runtime = _runtime(secrets=secrets, settings=settings, http=http, rpc_map={})
+    out = build_swap_prepare_graph(runtime).invoke(
+        {
+            "input": {
+                "from_chain": "ethereum",
+                "to_chain": "base",
+                "from_asset": "usdc",
+                "to_asset": "eth",
+                "from_amount_wei": "1000000",
+                "from_address": "0x4444444444444444444444444444444444444444",
+                "to_address": "0x5555555555555555555555555555555555555555",
+                "slippage": 0.01,
+                "order": "CHEAPEST",
+            }
+        }
+    )
+    assert out["result"]["prepared"]["route_id"] == "q-slippage"
+    assert len(urls) == 1
+    u = urls[0]
+    assert "integrator=aurey" in u
+    assert "slippage=0.01" in u
+    assert "order=CHEAPEST" in u
+    _assert_no_banned_values(out)
+
+
+def test_swap_prepare_graph_skips_allowance_hint_when_on_chain_sufficient():
+    """When Alchemy-backed allowance is already >= LiFi fromAmount, omit approve hint."""
+
+    alchemy_path = "vault/alchemy/x"
+    secrets = {"vault/lifi": "INJECTED_LIFI_KEY_BBB", alchemy_path: "INJECTED_ALCHEMY_KEY_AAA"}
+    settings = AureySettings(
+        lifi_api_secret_path="vault/lifi",
+        alchemy_api_secret_path=alchemy_path,
+    )
+    http = ScriptedHttpClient(
+        [
+            (
+                lambda **kw: kw.get("method") == "GET" and "/v1/quote?" in str(kw.get("url") or ""),
+                {
+                    "id": "swap-route-allow",
+                    "estimate": {
+                        "approvalAddress": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    },
+                    "action": {
+                        "fromAmount": "1000000",
+                        "fromToken": {
+                            "address": "0x1111111111111111111111111111111111111111",
+                        },
+                    },
+                    "transactionRequest": {
+                        "to": "0x3333333333333333333333333333333333333333",
+                        "data": "0x",
+                    },
+                },
+            )
+        ]
+    )
+
+    def eth_call(params: list[object]) -> str:
+        assert params[0]["to"] == "0x1111111111111111111111111111111111111111"
+        return "0x00000000000000000000000000000000000000000000000000000000000f4240"
+
+    runtime = _runtime(
+        secrets=secrets,
+        settings=settings,
+        http=http,
+        rpc_map={"eth_call": eth_call},
+    )
+    out = build_swap_prepare_graph(runtime).invoke(
+        {
+            "input": {
+                "from_chain": "ethereum",
+                "to_chain": "base",
+                "from_asset": "0x1111111111111111111111111111111111111111",
+                "to_asset": "0x2222222222222222222222222222222222222222",
+                "from_amount_wei": "1000000",
+                "from_address": "0x4444444444444444444444444444444444444444",
+                "to_address": "0x5555555555555555555555555555555555555555",
+            }
+        }
+    )
+    assert out["result"]["prepared"]["route_id"] == "swap-route-allow"
+    assert out["result"].get("allowance") is None
+    _assert_no_banned_values(out)
+
+
+def test_swap_prepare_graph_keeps_allowance_hint_when_on_chain_low():
+    secrets = {"vault/lifi": "INJECTED_LIFI_KEY_BBB", "vault/alchemy/x": "INJECTED_ALCHEMY_KEY_AAA"}
+    settings = AureySettings(
+        lifi_api_secret_path="vault/lifi",
+        alchemy_api_secret_path="vault/alchemy/x",
+    )
+    http = ScriptedHttpClient(
+        [
+            (
+                lambda **kw: kw.get("method") == "GET" and "/v1/quote?" in str(kw.get("url") or ""),
+                {
+                    "id": "swap-low",
+                    "estimate": {
+                        "approvalAddress": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    },
+                    "action": {
+                        "fromAmount": "1000000",
+                        "fromToken": {
+                            "address": "0x1111111111111111111111111111111111111111",
+                        },
+                    },
+                    "transactionRequest": {
+                        "to": "0x3333333333333333333333333333333333333333",
+                        "data": "0x",
+                    },
+                },
+            )
+        ]
+    )
+
+    def eth_call(_params: list[object]) -> str:
+        return "0x0000000000000000000000000000000000000000000000000000000000000064"
+
+    runtime = _runtime(
+        secrets=secrets,
+        settings=settings,
+        http=http,
+        rpc_map={"eth_call": eth_call},
+    )
+    out = build_swap_prepare_graph(runtime).invoke(
+        {
+            "input": {
+                "from_chain": "ethereum",
+                "to_chain": "base",
+                "from_asset": "0x1111111111111111111111111111111111111111",
+                "to_asset": "0x2222222222222222222222222222222222222222",
+                "from_amount_wei": "1000000",
+                "from_address": "0x4444444444444444444444444444444444444444",
+                "to_address": "0x5555555555555555555555555555555555555555",
+            }
+        }
+    )
+    al = out["result"]["allowance"]
+    assert al is not None
+    assert al["amount_raw"] == "1000000"
+    _assert_no_banned_values(out)
+
+
+def test_swap_prepare_graph_without_lifi_api_key():
+    settings = AureySettings(lifi_api_secret_path=None)
+
+    def match_quote(**kw: object) -> bool:
+        headers = kw.get("headers") or {}
+        u = str(kw.get("url") or "")
+        return (
+            kw.get("method") == "GET"
+            and "li.quest" in u
+            and "/v1/quote?" in u
+            and isinstance(headers, dict)
+            and "x-lifi-api-key" not in headers
+            and "integrator=aurey" in u
+        )
+
+    http = ScriptedHttpClient(
+        [
+            (
+                match_quote,
+                {
+                    "id": "public-quote",
+                    "transactionRequest": {
+                        "to": "0x3333333333333333333333333333333333333333",
+                        "data": "0x",
+                    },
+                },
+            )
+        ]
+    )
+    runtime = _runtime(secrets={}, settings=settings, http=http, rpc_map={})
+    out = build_swap_prepare_graph(runtime).invoke(
+        {
+            "input": {
+                "from_chain": "base",
+                "to_chain": "base",
+                "from_asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "to_asset": "0x4200000000000000000000000000000000000006",
+                "from_amount_wei": "1000000",
+                "from_address": "0x4444444444444444444444444444444444444444",
+                "to_address": "0x5555555555555555555555555555555555555555",
+            }
+        }
+    )
+    assert out["result"]["prepared"]["route_id"] == "public-quote"
+    assert out["result"].get("allowance") is None
+
+
+def test_swap_prepare_graph_maps_lifi_http_json_errors():
+    settings = AureySettings(lifi_api_secret_path="vault/lifi")
+    runtime = _runtime(
+        secrets={"vault/lifi": "not-a-real-key"},
+        settings=settings,
+        http=_LifiUnauthorizedHttp(),
+        rpc_map={},
+    )
+    out = build_swap_prepare_graph(runtime).invoke(
+        {
+            "input": {
+                "from_chain": "base",
+                "to_chain": "base",
+                "from_asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "to_asset": "0x4200000000000000000000000000000000000006",
+                "from_amount_wei": "1000000",
+                "from_address": "0x4444444444444444444444444444444444444444",
+                "to_address": "0x5555555555555555555555555555555555555555",
+            }
+        }
+    )
+    err = out["error"]
+    assert err["code"] == "http_error"
+    assert err["details"]["http_status"] == 401
+    assert err["details"]["lifi_message"] == "Invalid API key"
+    assert err["details"]["lifi_code"] == 1010
+
+
+def test_tx_prepare_lifi_swap_graph():
+    signing_path = "vault/signing/local"
+    secrets = {signing_path: "0x" + "ff" * 32}
+    settings = AureySettings(wallet_signing_key_secret_path=signing_path)
+    runtime = _runtime(secrets=secrets, settings=settings, http=ScriptedHttpClient(), rpc_map={})
+    wallet = "0xc1923710468607b8b7db38a6afbb9b432744390c"
+    prepared = {
+        "route_id": "4026c5d3-23c3-494d-8c1e-b1c9ba89657c:0",
+        "transaction_request": {
+            "to": "0x1234567890123456789012345678901234567890",
+            "data": "0xcafe",
+            "value": "0x0",
+            "chainId": 8453,
+            "from": wallet,
+            "gasLimit": "0x5208",
+        },
+    }
+    out = build_tx_prepare_lifi_graph(runtime).invoke(
+        {
+            "input": {
+                "chain": "base",
+                "from_address": wallet,
+                "prepared": prepared,
+            }
+        }
+    )
+    assert out.get("error") is None
+    env = out["result"]["envelope"]
+    assert env["kind"] == "lifi_swap"
+    assert env["chain_id"] == 8453
+    assert env["to"] == "0x1234567890123456789012345678901234567890"
+    assert env["data"] == "0xcafe"
+    assert env["value_hex"] == "0x0"
+    assert env["gas_limit_hex"] == "0x5208"
+    assert env["signing_key_secret_path"] == signing_path
+    _assert_no_banned_values(out)
+
+
+def test_tx_prepare_lifi_swap_graph_flat_route_and_transaction_request():
+    signing_path = "vault/signing/local"
+    secrets = {signing_path: "0x" + "ff" * 32}
+    settings = AureySettings(wallet_signing_key_secret_path=signing_path)
+    runtime = _runtime(secrets=secrets, settings=settings, http=ScriptedHttpClient(), rpc_map={})
+    wallet = "0xc1923710468607b8b7db38a6afbb9b432744390c"
+    out = build_tx_prepare_lifi_graph(runtime).invoke(
+        {
+            "input": {
+                "chain": "base",
+                "from_address": wallet,
+                "route_id": "f3288cb0-08fb-4b91-8b39-98f41ffad017:0",
+                "transaction_request": {
+                    "to": "0x1234567890123456789012345678901234567890",
+                    "data": "0x",
+                    "value": "0x0",
+                    "chainId": 8453,
+                },
+            }
+        }
+    )
+    assert out.get("error") is None
+    assert out["result"]["envelope"]["kind"] == "lifi_swap"
+
+
+def test_tx_prepare_lifi_swap_then_execute_roundtrip():
+    signing_path = "vault/signing/local"
+    secrets = {signing_path: "0x" + "ff" * 32}
+    settings = AureySettings(wallet_signing_key_secret_path=signing_path)
+    runtime = _runtime(secrets=secrets, settings=settings, http=ScriptedHttpClient(), rpc_map={})
+    wallet = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    prepared = {
+        "route_id": "lane-1",
+        "transaction_request": {
+            "to": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "data": "0xdeadbeef",
+            "value": 0,
+            "chainId": 8453,
+        },
+    }
+    prep = build_tx_prepare_lifi_graph(runtime).invoke(
+        {"input": {"chain": "base", "from_address": wallet, "prepared": prepared}}
+    )
+    execute = build_tx_execute_graph(runtime).invoke(
+        {"input": {"envelope": prep["result"]["envelope"]}}
+    )
+    assert execute.get("error") is None
+    assert execute["result"]["tx_hash"].startswith("0x")
+    assert execute["result"]["receipt"]["status"] == 1
+    _assert_no_banned_values(execute)
 
 
 def test_tx_prepare_and_execute_native_roundtrip():
@@ -482,3 +989,4 @@ def test_tx_execute_simulation_failure():
     out = build_tx_execute_graph(runtime).invoke({"input": {"envelope": env}})
     assert out.get("result") is None
     assert out["error"]["code"] == "simulation_failed"
+    assert "simulation_failed" in out["error"]["message"]

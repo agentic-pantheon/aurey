@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from aurey.custody.errors import SecretNotFoundError, SecretStoreUnavailableError
 from aurey.graphs.chains import chain_info
+from aurey.graphs.checkpoint_serde import uint256_checkpoint_str
 from aurey.graphs.evm_codec import format_token_units, normalize_evm_address, parse_evm_uint
 from aurey.graphs.results import (
     AlchemyPortfolioResult,
@@ -201,7 +202,8 @@ def _normalize_portfolio_token(token: dict[str, Any]) -> dict[str, Any]:
         return out
 
     decimals = _token_decimals(token)
-    out["balance_raw"] = balance_raw
+    # String: uint256 may exceed msgpack/orjson int64 range in LangGraph checkpoints.
+    out["balance_raw"] = uint256_checkpoint_str(balance_raw)
     out["decimals"] = decimals
     out["balance_decimal"] = (
         format_token_units(balance_raw, decimals) if decimals is not None else None

@@ -24,9 +24,9 @@ _LOGGERS_QUIET: tuple[tuple[str, int], ...] = (
 def _stderr_console() -> Any:
     from rich.console import Console
 
-    force = os.environ.get("AUREY_LOG_FORCE_COLOR", "").lower() in ("1", "true", "yes")
-    if force:
-        return Console(stderr=True, force=True)
+    force_color = os.environ.get("AUREY_LOG_FORCE_COLOR", "").lower() in ("1", "true", "yes")
+    if force_color:
+        return Console(stderr=True, force_terminal=True)
     return Console(stderr=True)
 
 

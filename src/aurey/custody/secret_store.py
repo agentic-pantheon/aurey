@@ -151,16 +151,31 @@ class OneClawHttpClient:
                 payload = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             raise SecretStoreUnavailableError(
-                "agent authentication", store_name="1Claw"
+                "/v1/auth/agent-token",
+                store_name="1Claw",
+                detail=(
+                    f"Agent token exchange failed with HTTP {exc.code}. "
+                    "This happens before any vault secret (e.g. Telegram path) is read. "
+                    "Check `oneclaw_agent_id`, bootstrap API key, and 1Claw availability."
+                ),
             ) from exc
         except (OSError, URLError, json.JSONDecodeError) as exc:
             raise SecretStoreUnavailableError(
-                "agent authentication", store_name="1Claw"
+                "/v1/auth/agent-token",
+                store_name="1Claw",
+                detail=(
+                    "Agent token exchange failed (network error or invalid JSON). "
+                    "This step runs before reading a vault secret path."
+                ),
             ) from exc
 
         token = payload.get("access_token")
         if not isinstance(token, str) or not token.strip():
-            raise SecretStoreUnavailableError("agent authentication", store_name="1Claw")
+            raise SecretStoreUnavailableError(
+                "/v1/auth/agent-token",
+                store_name="1Claw",
+                detail="Agent token response contained no usable `access_token`.",
+            )
 
         self._access_token = token.strip()
         self._access_token_agent = agent_id

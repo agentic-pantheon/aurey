@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from langchain_core.messages import HumanMessage
+from openai import APIConnectionError, APITimeoutError
 from pydantic import BaseModel
 
 from aurey.reasoning import thread_config
+from aurey.service.agent_trace import build_agent_trace_handler
 from aurey.service.message_content import (
     flatten_message_content,
     reply_preview_from_summary,
@@ -17,6 +20,10 @@ from aurey.service.message_content import (
 from aurey.service.state import AureyServiceState
 
 _log = logging.getLogger("aurey.turn")
+
+# Transient LLM HTTP failures (server disconnect before response; httpx RemoteProtocolError).
+_MODEL_TRANSIENT_ATTEMPTS = 4
+_MODEL_TRANSIENT_BASE_DELAY_SEC = 1.5
 
 
 def _log_clip(text: str, max_chars: int = 4000) -> str:
@@ -32,6 +39,30 @@ def _kv_line(**parts: str | int) -> str:
     """Compact key=value line (logger name already identifies the subsystem)."""
 
     return "  ".join(f"{k}={v}" for k, v in parts.items())
+
+
+def _invoke_graph_with_transient_retries(graph, *, message: str, config: dict[str, Any]) -> Any:
+    """Retry OpenAI connection/timeout blips that surface during ``graph.invoke``."""
+
+    payload = {"messages": [HumanMessage(content=message)]}
+    last_exc: BaseException | None = None
+    for attempt in range(_MODEL_TRANSIENT_ATTEMPTS):
+        try:
+            return graph.invoke(payload, config=config)
+        except (APIConnectionError, APITimeoutError) as exc:
+            last_exc = exc
+            if attempt + 1 >= _MODEL_TRANSIENT_ATTEMPTS:
+                raise
+            delay = _MODEL_TRANSIENT_BASE_DELAY_SEC * (2**attempt)
+            _log.warning(
+                "LLM transient network error (attempt %s/%s), retrying in %.1fs: %s",
+                attempt + 1,
+                _MODEL_TRANSIENT_ATTEMPTS,
+                delay,
+                exc,
+            )
+            time.sleep(delay)
+    raise AssertionError("unreachable") from last_exc
 
 
 class AgentInvokeError(BaseModel):
@@ -89,6 +120,16 @@ def invoke_deep_agent_turn(
     if context is not None:
         extra["aurey_context"] = context
     config = thread_config(session_id, **extra)
+    trace_handler = build_agent_trace_handler(session_id=session_id)
+    if trace_handler is not None:
+        prior = config.get("callbacks")
+        merged: list[Any] = [trace_handler]
+        if prior is not None:
+            if isinstance(prior, list):
+                merged.extend(prior)
+            else:
+                merged.append(prior)
+        config = {**config, "callbacks": merged}
 
     try:
         graph = svc.get_or_create_graph(model)
@@ -112,7 +153,9 @@ def invoke_deep_agent_turn(
         )
 
     try:
-        result = graph.invoke({"messages": [HumanMessage(content=message)]}, config=config)
+        result = _invoke_graph_with_transient_retries(
+            graph, message=message, config=config
+        )
     except Exception:
         _log.debug("agent invoke failed", exc_info=True)
         err_msg = "The agent failed to complete this turn."

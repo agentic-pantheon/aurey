@@ -8,7 +8,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from aurey.graphs.ports import EvmJsonRpcPort, HttpJsonPort
+from aurey.graphs.ports import EvmJsonRpcPort, HttpJsonPort, HttpJsonRequestError
 
 
 class UrllibHttpJsonClient(HttpJsonPort):
@@ -36,7 +36,19 @@ class UrllibHttpJsonClient(HttpJsonPort):
             with urlopen(req, timeout=self._timeout_s) as resp:
                 raw = resp.read()
         except HTTPError as exc:
-            raise RuntimeError(f"HTTP request failed ({exc.code}).") from exc
+            raw_body = exc.read().decode("utf-8", errors="replace")
+            payload: dict[str, Any] | None = None
+            try:
+                decoded = json.loads(raw_body)
+                if isinstance(decoded, dict):
+                    payload = decoded
+            except json.JSONDecodeError:
+                pass
+            raise HttpJsonRequestError(
+                status_code=int(exc.code),
+                body_text=raw_body[:4000],
+                payload=payload,
+            ) from exc
         except URLError as exc:
             raise RuntimeError("HTTP request failed (network error).") from exc
 

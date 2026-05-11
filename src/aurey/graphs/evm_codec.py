@@ -37,6 +37,12 @@ def erc20_approve_data(spender: str, amount_wei: int) -> str:
     return "0x095ea7b3" + _pad_addr(spender) + _pad_uint256(amount_wei)
 
 
+def erc20_allowance_calldata(owner: str, spender: str) -> str:
+    """ERC-20 ``allowance(address,address)`` — selector keccak256(...)[:4]."""
+
+    return "0xdd62ed3e" + _pad_addr(owner) + _pad_addr(spender)
+
+
 # ERC-20 `decimals()` selector — keccak256("decimals()")[:4]
 ERC20_DECIMALS_CALLDATA = "0x313ce567"
 

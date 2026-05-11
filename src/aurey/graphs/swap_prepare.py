@@ -2,26 +2,62 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any, Literal, TypedDict
+from urllib.parse import urlencode
 
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field, ValidationError
 
 from aurey.custody.errors import SecretNotFoundError, SecretStoreUnavailableError
 from aurey.graphs.chains import chain_id_for, chain_info
-from aurey.graphs.evm_codec import normalize_evm_address
-from aurey.graphs.results import GraphErrorBody, LiFiPreparedTx, SwapPrepareResult
+from aurey.graphs.evm_codec import (
+    decode_abi_uint256_word,
+    erc20_allowance_calldata,
+    normalize_evm_address,
+)
+from aurey.graphs.ports import HttpJsonRequestError
+from aurey.graphs.read import _alchemy_rpc_or_error
+from aurey.graphs.results import (
+    GraphErrorBody,
+    LiFiAllowanceHint,
+    LiFiPreparedTx,
+    SwapPrepareResult,
+)
+from aurey.graphs.swap_diag import SWAP_LOG, addr_short
 from aurey.runtime import AureyRuntime
+
+_log = logging.getLogger(__name__)
+
+# LiFi returns 403 for urllib's default ``Python-urllib/...`` user-agent (edge/WAF).
+_LIFI_HTTP_USER_AGENT = "Aurey/1.0 (LiFi API client; +https://docs.li.fi/)"
 
 
 class SwapPrepareInput(BaseModel):
     from_chain: str = Field(min_length=1)
     to_chain: str = Field(min_length=1)
-    from_asset: str = Field(min_length=1)
-    to_asset: str = Field(min_length=1)
+    from_asset: str = Field(
+        min_length=1,
+        description="Token contract (0x…) or symbol as accepted by LiFi ``fromToken``.",
+    )
+    to_asset: str = Field(
+        min_length=1,
+        description="Token contract (0x…) or symbol as accepted by LiFi ``toToken``.",
+    )
     from_amount_wei: str = Field(min_length=1, pattern=r"^[0-9]+$")
     from_address: str = Field(min_length=1)
     to_address: str = Field(min_length=1)
+    slippage: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Max slippage as decimal (e.g. 0.005 = 0.5%%). Omit for LiFi default.",
+    )
+    order: Literal["FASTEST", "CHEAPEST"] | None = Field(
+        default=None,
+        description="LiFi route preference; omit for LiFi default sorting.",
+    )
 
 
 class SwapGraphState(TypedDict, total=False):
@@ -69,13 +105,17 @@ def _validate_node(state: SwapGraphState) -> SwapGraphState:
 
 
 def _resolve_lifi_key(runtime: AureyRuntime) -> tuple[str | None, dict[str, Any] | None]:
+    """Return ``(api_key, None)`` or ``(None, None)`` when LiFi should run without a key.
+
+    If ``lifi_api_secret_path`` is unset or blank, LiFi is called without ``x-lifi-api-key``
+    (public / IP-based rate limits). If a path is set, the secret must resolve or an error
+    dict is returned.
+    """
+
     path = runtime.settings.lifi_api_secret_path
-    if not path:
-        err = GraphErrorBody(
-            code="secret_not_configured",
-            message="LiFi API secret path is not configured.",
-        ).model_dump()
-        return None, err
+    if path is None or not str(path).strip():
+        return None, None
+    path = str(path).strip()
     try:
         return runtime.secret_store.get_secret(path).reveal(), None
     except SecretNotFoundError:
@@ -94,6 +134,166 @@ def _resolve_lifi_key(runtime: AureyRuntime) -> tuple[str | None, dict[str, Any]
         return None, err
 
 
+def _normalize_lifi_token_param(value: str) -> str:
+    """Normalize hex token addresses; pass symbols / other ids through unchanged."""
+
+    raw = value.strip()
+    low = raw.lower()
+    if low.startswith("0x") and len(low) == 42:
+        try:
+            return normalize_evm_address(raw)
+        except ValueError:
+            return raw
+    return raw
+
+
+def _lifi_quote_query_params(
+    *,
+    parsed: SwapPrepareInput,
+    from_cid: int,
+    to_cid: int,
+    runtime: AureyRuntime,
+) -> dict[str, str]:
+    """Build flat query dict for ``GET /v1/quote`` (LiFi OpenAPI)."""
+
+    params: dict[str, str] = {
+        "fromChain": str(from_cid),
+        "toChain": str(to_cid),
+        "fromToken": _normalize_lifi_token_param(parsed.from_asset),
+        "toToken": _normalize_lifi_token_param(parsed.to_asset),
+        "fromAmount": str(parsed.from_amount_wei),
+        "fromAddress": normalize_evm_address(parsed.from_address),
+        "toAddress": normalize_evm_address(parsed.to_address),
+    }
+    if parsed.slippage is not None:
+        params["slippage"] = str(parsed.slippage)
+    if parsed.order is not None:
+        params["order"] = parsed.order
+    integrator = (runtime.settings.lifi_integrator or "").strip()
+    if integrator:
+        params["integrator"] = integrator
+    return params
+
+
+def _lifi_quote_http_error_details(exc: HttpJsonRequestError) -> dict[str, Any]:
+    """Normalize LiFi / CDN error JSON and plain-text bodies for tool-facing ``details``."""
+
+    li = exc.payload if isinstance(exc.payload, dict) else {}
+    code: Any = li.get("code")
+    if code is None:
+        code = li.get("errorCode")
+
+    message: Any = li.get("message")
+    if message is None:
+        err = li.get("error")
+        if isinstance(err, str):
+            message = err
+        elif isinstance(err, dict):
+            message = err.get("message")
+
+    preview = (exc.body_text or "").strip()
+    if not message and preview:
+        message = preview[:800]
+
+    details: dict[str, Any] = {
+        "http_status": exc.status_code,
+        "lifi_code": code,
+        "lifi_message": str(message) if message is not None else None,
+    }
+    if preview and len(preview) > (len(str(message)) if message else 0):
+        details["body_preview"] = preview[:400]
+    return details
+
+
+def _lifi_allowance_hint(payload: dict[str, Any]) -> LiFiAllowanceHint | None:
+    """If LiFi returned an approval spender, surface ERC-20 approve params for the agent."""
+
+    est = payload.get("estimate")
+    if not isinstance(est, dict):
+        return None
+    spender = est.get("approvalAddress")
+    if not spender:
+        return None
+
+    action = payload.get("action")
+    if not isinstance(action, dict):
+        return None
+    from_tok = action.get("fromToken")
+    if not isinstance(from_tok, dict):
+        return None
+    token_addr = from_tok.get("address")
+    if not token_addr:
+        return None
+    raw = str(token_addr).strip().lower()
+    if raw in (
+        "0x0000000000000000000000000000000000000000",
+        "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    ):
+        return None
+
+    from_amt = action.get("fromAmount")
+    if from_amt is None or str(from_amt).strip() == "":
+        return None
+    amt_str = str(from_amt).strip()
+    if not amt_str.isdigit():
+        return None
+
+    try:
+        return LiFiAllowanceHint(
+            token_address=normalize_evm_address(str(token_addr)),
+            spender_address=normalize_evm_address(str(spender)),
+            amount_raw=amt_str,
+        )
+    except ValueError:
+        return None
+
+
+def _onchain_allowance_for_hint(
+    runtime: AureyRuntime,
+    chain: str,
+    owner: str,
+    hint: LiFiAllowanceHint,
+) -> int | None:
+    """Return current allowance if Alchemy RPC works; ``None`` to skip filtering."""
+
+    rpc, err_body = _alchemy_rpc_or_error(runtime, chain)
+    if err_body is not None or rpc is None:
+        return None
+    token = hint.token_address
+    spender = hint.spender_address
+    try:
+        data = erc20_allowance_calldata(owner, spender)
+        raw = rpc.call(
+            "eth_call",
+            [{"to": token, "data": data}, "latest"],
+        )
+        if not isinstance(raw, str):
+            return None
+        return decode_abi_uint256_word(raw)
+    except Exception:
+        _log.debug("ERC-20 allowance eth_call failed; keeping LiFi allowance hint", exc_info=True)
+        return None
+
+
+def _allowance_hint_after_onchain_check(
+    runtime: AureyRuntime,
+    chain: str,
+    owner: str,
+    hint: LiFiAllowanceHint | None,
+) -> LiFiAllowanceHint | None:
+    """Omit the approve hint when the wallet already has enough allowance."""
+
+    if hint is None:
+        return None
+    required = int(hint.amount_raw)
+    current = _onchain_allowance_for_hint(runtime, chain, owner, hint)
+    if current is None:
+        return hint
+    if current >= required:
+        return None
+    return hint
+
+
 def _execute_node(runtime: AureyRuntime, state: SwapGraphState) -> SwapGraphState:
     if state.get("error"):
         return {}
@@ -102,7 +302,8 @@ def _execute_node(runtime: AureyRuntime, state: SwapGraphState) -> SwapGraphStat
     api_key, err = _resolve_lifi_key(runtime)
     if err is not None:
         return {"error": err}
-    assert api_key is not None
+
+    lifi_key_header = api_key.strip() if api_key else ""
 
     from_cid = chain_id_for(parsed.from_chain)
     to_cid = chain_id_for(parsed.to_chain)
@@ -114,34 +315,102 @@ def _execute_node(runtime: AureyRuntime, state: SwapGraphState) -> SwapGraphStat
             ).model_dump()
         }
 
-    url = f"{runtime.lifi_base_url.rstrip('/')}/v1/quote"
-    body: dict[str, Any] = {
-        "fromChain": from_cid,
-        "toChain": to_cid,
-        "fromToken": parsed.from_asset,
-        "toToken": parsed.to_asset,
-        "fromAmount": parsed.from_amount_wei,
-        "fromAddress": normalize_evm_address(parsed.from_address),
-        "toAddress": normalize_evm_address(parsed.to_address),
-    }
+    # GET /v1/quote per https://docs.li.fi/llms.txt and OpenAPI (integrator, slippage, order, …).
+    q = _lifi_quote_query_params(
+        parsed=parsed, from_cid=from_cid, to_cid=to_cid, runtime=runtime
+    )
+    url = f"{runtime.lifi_base_url.rstrip('/')}/v1/quote?{urlencode(q)}"
+    headers: dict[str, str] = {"User-Agent": _LIFI_HTTP_USER_AGENT}
+    if lifi_key_header:
+        headers["x-lifi-api-key"] = lifi_key_header
+    t_wall = time.perf_counter()
+    SWAP_LOG.info(
+        "swap_prepare_graph start from_chain=%s to_chain=%s from_asset=%s to_asset=%s "
+        "amount_wei=%s from=%s to=%s",
+        parsed.from_chain.strip().lower(),
+        parsed.to_chain.strip().lower(),
+        parsed.from_asset,
+        parsed.to_asset,
+        parsed.from_amount_wei,
+        addr_short(parsed.from_address),
+        addr_short(parsed.to_address),
+    )
+    lifi_http_ms = -1.0
     try:
-        payload = runtime.http.request_json(
-            method="POST",
-            url=url,
-            headers={
-                "Content-Type": "application/json",
-                "X-API-KEY": api_key,
-            },
-            json_body=body,
-        )
-        tx_request = payload.get("transactionRequest") or payload.get("tx") or {}
+        t_lifi = time.perf_counter()
+        try:
+            payload = runtime.http.request_json(
+                method="GET",
+                url=url,
+                headers=headers,
+                json_body=None,
+            )
+        finally:
+            lifi_http_ms = (time.perf_counter() - t_lifi) * 1000
+        tx_request = payload.get("transactionRequest") or payload.get("tx")
+        if not isinstance(tx_request, dict) or not tx_request.get("to"):
+            SWAP_LOG.info(
+                "swap_prepare_graph fail code=no_tx_req lifi_http_ms=%.1f total_ms=%.1f",
+                lifi_http_ms,
+                (time.perf_counter() - t_wall) * 1000,
+            )
+            return {
+                "error": GraphErrorBody(
+                    code="swap_prepare_failed",
+                    message="LiFi quote did not include an executable transaction request.",
+                    details={
+                        "lifi_step_id": payload.get("id"),
+                        "keys": sorted(str(k) for k in payload.keys()),
+                    },
+                ).model_dump()
+            }
         route_id = str(payload.get("routeId") or payload.get("id") or "lifi-route")
-        if not isinstance(tx_request, dict):
-            raise TypeError("unexpected transaction request shape")
         prepared = LiFiPreparedTx(route_id=route_id, transaction_request=dict(tx_request))
-        result = SwapPrepareResult(prepared=prepared)
+        owner = normalize_evm_address(parsed.from_address)
+        t_allow = time.perf_counter()
+        try:
+            hint = _allowance_hint_after_onchain_check(
+                runtime,
+                parsed.from_chain.strip().lower(),
+                owner,
+                _lifi_allowance_hint(payload),
+            )
+        finally:
+            allowance_phase_ms = (time.perf_counter() - t_allow) * 1000
+        result = SwapPrepareResult(prepared=prepared, allowance=hint)
+        total_ms = (time.perf_counter() - t_wall) * 1000
+        SWAP_LOG.info(
+            "swap_prepare_graph ok route_id=%s lifi_http_ms=%.1f allowance_phase_ms=%.1f "
+            "needs_erc20_approve=%s total_ms=%.1f",
+            route_id,
+            lifi_http_ms,
+            allowance_phase_ms,
+            hint is not None,
+            total_ms,
+        )
         return {"result": result.model_dump()}
+    except HttpJsonRequestError as exc:
+        _log.debug("LiFi quote HTTP error", exc_info=True)
+        SWAP_LOG.info(
+            "swap_prepare_graph fail code=http_error lifi_http_ms=%.1f total_ms=%.1f status=%s",
+            lifi_http_ms,
+            (time.perf_counter() - t_wall) * 1000,
+            getattr(exc, "status_code", None),
+        )
+        return {
+            "error": GraphErrorBody(
+                code="http_error",
+                message="LiFi rejected the quote request (HTTP error).",
+                details=_lifi_quote_http_error_details(exc),
+            ).model_dump()
+        }
     except Exception:
+        _log.exception("LiFi swap preparation failed")
+        SWAP_LOG.info(
+            "swap_prepare_graph fail code=exception lifi_http_ms=%.1f total_ms=%.1f",
+            lifi_http_ms,
+            (time.perf_counter() - t_wall) * 1000,
+        )
         return {
             "error": GraphErrorBody(
                 code="swap_prepare_failed",

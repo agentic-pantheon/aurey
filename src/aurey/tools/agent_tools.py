@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+import time
+from typing import Any, Literal
 
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
@@ -12,14 +13,18 @@ from aurey.graphs import (
     TxExecuteInput,
     TxPrepareErc20Approval,
     TxPrepareErc20Transfer,
+    TxPrepareLiFiInput,
     TxPrepareNative,
     build_alchemy_graph,
     build_read_graph,
     build_swap_prepare_graph,
     build_tx_execute_graph,
     build_tx_prepare_graph,
+    build_tx_prepare_lifi_graph,
 )
+from aurey.graphs.chains import chain_name_for_id
 from aurey.graphs.read import ReadGraphInput
+from aurey.graphs.swap_diag import SWAP_LOG, log_swap_tool
 from aurey.runtime import AureyRuntime
 from aurey.tools.user_input import RequestUserInputArgs, UserQuestion, note_user_input_request
 
@@ -30,6 +35,59 @@ def _graph_payload(state: dict[str, Any]) -> dict[str, Any]:
     if err is not None:
         return {"ok": False, "error": err}
     return {"ok": True, "result": res}
+
+
+def _parse_chain_id_field(raw: Any) -> int | None:
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        if isinstance(raw, int):
+            return raw if raw >= 0 else None
+        if isinstance(raw, str):
+            s = raw.strip()
+            return int(s, 16) if s.startswith(("0x", "0X")) else int(s, 10)
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _try_coerce_lifi_prepared_to_execute_envelope(
+    envelope: dict[str, Any],
+    prepare_lifi_g: Any,
+) -> dict[str, Any] | None:
+    """Build execute envelope when ``prepared`` (route + tx) was passed instead."""
+
+    if envelope.get("kind"):
+        return None
+    rid = envelope.get("route_id") or envelope.get("routeId")
+    tx_req = envelope.get("transaction_request") or envelope.get("transactionRequest")
+    if not rid or not isinstance(tx_req, dict):
+        return None
+
+    cid = _parse_chain_id_field(tx_req.get("chainId"))
+    if cid is None:
+        return None
+    chain = chain_name_for_id(cid)
+    if chain is None:
+        return None
+    from_raw = tx_req.get("from")
+    if from_raw is None or str(from_raw).strip() == "":
+        return None
+
+    payload = TxPrepareLiFiInput(
+        chain=chain,
+        from_address=str(from_raw).strip(),
+        prepared={"route_id": str(rid), "transaction_request": dict(tx_req)},
+    )
+    state = prepare_lifi_g.invoke(
+        {"input": payload.model_dump(mode="json", exclude_none=True)}
+    )
+    err = state.get("error")
+    res = state.get("result")
+    if err is not None or not isinstance(res, dict):
+        return None
+    fixed = res.get("envelope")
+    return fixed if isinstance(fixed, dict) else None
 
 
 class AlchemyTokenPricesArgs(BaseModel):
@@ -139,6 +197,20 @@ class EvmGetErc20DecimalsArgs(BaseModel):
     token_address: str = Field(min_length=1)
 
 
+class EvmResolveEnsArgs(BaseModel):
+    """Resolve an ENS name to an Ethereum checksum-normalized hex address."""
+
+    name: str = Field(
+        min_length=1,
+        description="ENS name such as nick.eth (trimmed and lower-cased by the tool).",
+    )
+    chain: str = Field(
+        default="ethereum",
+        min_length=1,
+        description="Must be 'ethereum'. ENS forward resolution is only defined on L1 mainnet.",
+    )
+
+
 def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
     """Compile subgraphs once and expose strict LangChain tools (validated graph inputs only)."""
 
@@ -146,6 +218,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
     alchemy_g = build_alchemy_graph(runtime)
     swap_g = build_swap_prepare_graph(runtime)
     prepare_g = build_tx_prepare_graph(runtime)
+    prepare_lifi_g = build_tx_prepare_lifi_graph(runtime)
     execute_g = build_tx_execute_graph(runtime)
 
     @tool(args_schema=EvmGetNativeBalanceArgs)
@@ -201,9 +274,25 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         )
         return _graph_payload(read_g.invoke({"input": graph_in.model_dump()}))
 
+    @tool(args_schema=EvmResolveEnsArgs)
+    def evm_resolve_ens(name: str, chain: str = "ethereum") -> dict[str, Any]:
+        """Resolve ENS on **ethereum mainnet** to a ``0x`` address (registry + resolver).
+
+        Call **before** ``tx_prepare_*`` / ``swap_prepare`` when the user gives an ENS name as
+        ``to_address`` or recipient; use ``result['resolved_address']``. Other chains reject.
+        """
+        payload = EvmResolveEnsArgs(name=name, chain=chain)
+        graph_in = ReadGraphInput(
+            operation="ens_resolve",
+            chain=payload.chain,
+            ens_name=payload.name,
+        )
+        return _graph_payload(read_g.invoke({"input": graph_in.model_dump()}))
+
     tools: list[BaseTool] = [
         evm_get_native_balance,
         evm_get_erc20_decimals,
+        evm_resolve_ens,
         resolve_known_address,
         evm_get_erc20_balance,
     ]
@@ -274,8 +363,27 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         from_amount_wei: str,
         from_address: str,
         to_address: str,
+        slippage: float | None = None,
+        order: Literal["FASTEST", "CHEAPEST"] | None = None,
     ) -> dict[str, Any]:
-        """LiFi swap quote + next unsigned tx request."""
+        """LiFi swap quote + next unsigned tx request (`transaction_request`).
+
+        Uses LiFi ``GET /v1/quote`` (see https://docs.li.fi/llms.txt). Optional ``slippage`` is
+        a decimal fraction (e.g. ``0.005`` = 0.5%%). Optional ``order`` is ``FASTEST`` or
+        ``CHEAPEST``. Prefer **checksum** ``0x`` token addresses when possible.
+
+        On success, pass **the same** ``chain`` and ``from_address`` plus
+        ``prepared=result['prepared']`` into ``tx_prepare_lifi_swap``, then call
+        ``tx_execute(envelope=...)`` with that tool's ``result['envelope']``.
+
+        When ``result`` includes ``allowance``, the wallet must approve the spender for the
+        sell token before the swap simulates (unless allowance was already sufficient—then
+        ``swap_prepare`` omits ``allowance`` when Alchemy is configured). Use
+        ``tx_prepare_erc20_approval`` then ``tx_execute`` that tx first (see system rules).
+
+        If ``to_address`` (or ``from_address``) is an ENS name like ``alice.eth``, run
+        ``evm_resolve_ens`` on **ethereum** first and pass the returned hex address here.
+        """
         payload = SwapPrepareInput(
             from_chain=from_chain,
             to_chain=to_chain,
@@ -284,10 +392,67 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
             from_amount_wei=from_amount_wei,
             from_address=from_address,
             to_address=to_address,
+            slippage=slippage,
+            order=order,
         )
-        return _graph_payload(swap_g.invoke({"input": payload.model_dump()}))
+        t0 = time.perf_counter()
+        out = _graph_payload(swap_g.invoke({"input": payload.model_dump()}))
+        rid = None
+        if out.get("ok") and isinstance(out.get("result"), dict):
+            prep = out["result"].get("prepared")
+            if isinstance(prep, dict):
+                rid = prep.get("route_id")
+        log_swap_tool(
+            name="swap_prepare",
+            wall_ms=(time.perf_counter() - t0) * 1000,
+            ok=out.get("ok"),
+            route_id=rid,
+            from_chain=from_chain,
+            to_chain=to_chain,
+        )
+        return out
 
     tools.append(swap_prepare)
+
+    @tool(args_schema=TxPrepareLiFiInput)
+    def tx_prepare_lifi_swap(
+        chain: str,
+        from_address: str,
+        prepared: dict[str, Any] | None = None,
+        route_id: str | None = None,
+        transaction_request: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Convert ``swap_prepare`` output into a ``tx_execute`` envelope.
+
+        Pass either (a) ``prepared`` verbatim from ``swap_prepare`` ``result['prepared']``, or
+        (b) ``route_id`` plus ``transaction_request`` (the LiFi tx object) if nested ``prepared``
+        is hard to supply. On success, call ``tx_execute(envelope=result['envelope'])``.
+        Resolve ENS names on ethereum with ``evm_resolve_ens`` before supplying ``from_address``.
+        """
+        payload = TxPrepareLiFiInput(
+            chain=chain,
+            from_address=from_address,
+            prepared=prepared,
+            route_id=route_id,
+            transaction_request=transaction_request,
+        )
+        t0 = time.perf_counter()
+        out = _graph_payload(
+            prepare_lifi_g.invoke({"input": payload.model_dump(mode="json", exclude_none=True)})
+        )
+        rid = route_id
+        if rid is None and isinstance(prepared, dict):
+            rid = prepared.get("route_id")
+        log_swap_tool(
+            name="tx_prepare_lifi_swap",
+            wall_ms=(time.perf_counter() - t0) * 1000,
+            ok=out.get("ok"),
+            route_id=rid,
+            chain=chain,
+        )
+        return out
+
+    tools.append(tx_prepare_lifi_swap)
 
     @tool(args_schema=TxPrepareNativeArgs)
     def tx_prepare_native_transfer(
@@ -299,7 +464,8 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         """Prepare native gas-token transfer envelope (signing path only, no key material).
 
         On success (`ok` true), broadcast with `tx_execute(envelope=result['envelope'])` using that
-        dict verbatim.
+        dict verbatim. If ``to_address`` is an ENS name, call ``evm_resolve_ens`` first on
+        ethereum and use ``resolved_address`` as ``to_address``.
         """
         payload = TxPrepareNative(
             chain=chain,
@@ -324,7 +490,8 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         `amount_wei` is misleadingly named: use the token's **native decimals** (raw integer),
         not ETH wei. USDC = 6 decimals. On success (`ok` true), call
         `tx_execute(envelope=result['envelope'])` with the returned envelope unchanged.
-        Never call `tx_execute` without `envelope`.
+        Never call `tx_execute` without `envelope`. Resolve ENS recipients with
+        ``evm_resolve_ens`` (ethereum) before passing ``to_address``.
         """
         payload = TxPrepareErc20Transfer(
             chain=chain,
@@ -368,13 +535,35 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
     ) -> dict[str, Any]:
         """Run simulate/policy/sign/broadcast for a prepared transaction envelope.
 
-        You MUST pass `envelope`: the exact `result.envelope` dict from the latest successful
-        `tx_prepare_native_transfer`, `tx_prepare_erc20_transfer`, or `tx_prepare_erc20_approval`
-        tool output. Omitting `envelope` is invalid.
+        You MUST pass ``envelope``: normally the exact ``result['envelope']`` dict from a successful
+        ``tx_prepare_*`` tool. If you mistakenly pass ``swap_prepare``'s ``prepared`` object
+        (``route_id`` + ``transaction_request`` only), this tool will attempt to repair it by
+        running the LiFi prepare step using ``chainId`` / ``from`` inside ``transaction_request``.
         """
+        fixed = _try_coerce_lifi_prepared_to_execute_envelope(envelope, prepare_lifi_g)
+        if fixed is not None:
+            SWAP_LOG.info(
+                "tx_execute auto-prepared LiFi envelope from mistaken prepared blob route_id=%s",
+                envelope.get("route_id") or envelope.get("routeId"),
+            )
+            envelope = fixed
+
         root = TxExecuteToolArgs(envelope=envelope, idempotency_key=idempotency_key)
         execute_in = TxExecuteInput.model_validate(root.model_dump()).model_dump()
-        return _graph_payload(execute_g.invoke({"input": execute_in}))
+        t0 = time.perf_counter()
+        out = _graph_payload(execute_g.invoke({"input": execute_in}))
+        kind = envelope.get("kind") if isinstance(envelope, dict) else None
+        th = None
+        if out.get("ok") and isinstance(out.get("result"), dict):
+            th = out["result"].get("tx_hash")
+        log_swap_tool(
+            name="tx_execute",
+            wall_ms=(time.perf_counter() - t0) * 1000,
+            ok=out.get("ok"),
+            kind=kind,
+            tx_hash=th,
+        )
+        return out
 
     tools.append(tx_execute)
 
@@ -395,6 +584,7 @@ __all__ = [
     "AlchemyTransferHistoryArgs",
     "EvmGetErc20BalanceArgs",
     "EvmGetNativeBalanceArgs",
+    "EvmResolveEnsArgs",
     "ResolveKnownAddressArgs",
     "SwapPrepareInput",
     "TxPrepareErc20ApprovalArgs",

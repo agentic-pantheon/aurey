@@ -48,7 +48,17 @@ class AureySettings(BaseSettings):
     )
     lifi_api_secret_path: str | None = Field(
         default=None,
-        description="1Claw vault path for LiFi API key.",
+        description=(
+            "Optional 1Claw vault path for LiFi API key. If unset, swap quotes use "
+            "unauthenticated LiFi (lower rate limits)."
+        ),
+    )
+    lifi_integrator: str = Field(
+        default="aurey",
+        description=(
+            "Sent as LiFi ``integrator`` query param on ``GET /v1/quote`` (tracking / routing). "
+            "Set empty to omit."
+        ),
     )
     wallet_signing_key_secret_path: str | None = Field(
         default=None,
