@@ -55,6 +55,7 @@ class Erc20ReadPlaceholder(BaseModel):
 
     chain: str
     operation: Literal["erc20_balance", "erc20_allowance", "erc20_metadata", "contract_read"]
+    token_address: str | None = None
     status: Literal["placeholder"] = "placeholder"
     message: str = "On-chain ERC-20 read path not wired in this build."
 

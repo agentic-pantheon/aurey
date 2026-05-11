@@ -29,6 +29,7 @@ class ReadGraphInput(BaseModel):
     operation: Literal["native_balance", "known_address", "erc20_balance"]
     chain: str = Field(min_length=1)
     wallet_address: str | None = None
+    token_address: str | None = None
     known_ticker: str | None = None
 
 
@@ -88,15 +89,16 @@ def _validate_node(state: ReadGraphState) -> ReadGraphState:
                 ).model_dump()
             }
     if parsed.operation == "erc20_balance":
-        if not parsed.wallet_address:
+        if not parsed.wallet_address or not parsed.token_address:
             return {
                 "error": GraphErrorBody(
                     code="invalid_input",
-                    message="wallet_address is required for erc20_balance.",
+                    message="wallet_address and token_address are required for erc20_balance.",
                 ).model_dump()
             }
         try:
             normalize_evm_address(parsed.wallet_address)
+            normalize_evm_address(parsed.token_address)
         except ValueError as exc:
             return {
                 "error": GraphErrorBody(
@@ -134,7 +136,11 @@ def _execute_node(runtime: AureyRuntime, state: ReadGraphState) -> ReadGraphStat
         return {"result": result.model_dump()}
 
     if parsed.operation == "erc20_balance":
-        placeholder = Erc20ReadPlaceholder(chain=chain, operation="erc20_balance")
+        placeholder = Erc20ReadPlaceholder(
+            chain=chain,
+            operation="erc20_balance",
+            token_address=normalize_evm_address(parsed.token_address or ""),
+        )
         return {"result": placeholder.model_dump()}
 
     rpc_path = rpc_secret_path_for_chain(runtime.settings, chain)
