@@ -4,22 +4,25 @@ overview: Greenfield blueprint for a Python service that uses LangChain Deep Age
 todos:
   - id: skeleton-deps
     content: Add pyproject + deps (langchain, langgraph, deepagents, pydantic-settings); create package layout (settings, custody, reasoning, tools, graphs).
-    status: pending
+    status: completed
   - id: oneclaw-custody
     content: Implement SecretStore protocol, OneClawHttpClient + OneClawSecretStore, FakeSecretStore; settings with path fields + bootstrap API key env name.
-    status: pending
+    status: completed
   - id: graphs-read-execute
     content: LangGraphs for Mercury-parity paths—EVM reads, Alchemy (prices/portfolio/transfers), swap_prepare (LiFi router + backends), tx prepare/execute; provider + HTTP clients resolve secrets via SecretStore only inside graphs.
-    status: pending
+    status: completed
   - id: deep-agent-tools
     content: Expose LangChain tools wrapping subgraph invokes; register harness + create_deep_agent with checkpointer and request_user_input tool.
-    status: pending
+    status: completed
   - id: api-di
     content: 'Optional FastAPI app: build SecretStore + runtime once; single invoke endpoint with session_id + context.'
-    status: pending
+    status: completed
   - id: tests-security
     content: Unit tests per graph; schema snapshots; leakage test (no raw secrets in tool outputs/logs).
-    status: pending
+    status: completed
+  - id: telegram-client
+    content: Add optional Telegram bot client that reuses the shared service/deep-agent invocation path with token resolved through SecretStore.
+    status: completed
 isProject: false
 ---
 
