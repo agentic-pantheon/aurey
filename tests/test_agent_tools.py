@@ -65,14 +65,14 @@ def _clear_user_input_ctx():
 
 
 def test_tool_schemas_include_expected_names_and_descriptions():
-    rpc_path = "vault/rpc/ethereum"
+    alchemy_path = "vault/alchemy"
     signing_path = "vault/signing/local"
     secrets = {
-        rpc_path: "https://rpc.example.invalid/rpc?q=INJECTED_RPC_URL_SECRET_FRAGMENT",
+        alchemy_path: "INJECTED_ALCHEMY_KEY_AAA",
         signing_path: "0x" + "ff" * 32,
     }
     settings = AureySettings(
-        ethereum_rpc_secret_path=rpc_path,
+        alchemy_api_secret_path=alchemy_path,
         wallet_signing_key_secret_path=signing_path,
     )
     runtime = AureyRuntime(
@@ -107,14 +107,14 @@ def test_tool_schemas_include_expected_names_and_descriptions():
 
 
 def test_evm_get_native_balance_tool_fake_runtime():
-    rpc_path = "vault/rpc/ethereum"
+    alchemy_path = "vault/alchemy"
     signing_path = "vault/signing/local"
     secrets = {
-        rpc_path: "https://rpc.example.invalid/rpc?q=INJECTED_RPC_URL_SECRET_FRAGMENT",
+        alchemy_path: "INJECTED_ALCHEMY_KEY_AAA",
         signing_path: "0x" + "ff" * 32,
     }
     settings = AureySettings(
-        ethereum_rpc_secret_path=rpc_path,
+        alchemy_api_secret_path=alchemy_path,
         wallet_signing_key_secret_path=signing_path,
     )
     runtime = AureyRuntime(
@@ -138,11 +138,9 @@ def test_evm_get_native_balance_tool_fake_runtime():
 
 
 def test_resolve_known_address_tool_fake_runtime():
-    rpc_path = "vault/rpc/ethereum"
     signing_path = "vault/signing/local"
-    secrets = {rpc_path: "x", signing_path: "0x" + "ff" * 32}
+    secrets = {signing_path: "0x" + "ff" * 32}
     settings = AureySettings(
-        ethereum_rpc_secret_path=rpc_path,
         wallet_signing_key_secret_path=signing_path,
     )
     runtime = AureyRuntime(
@@ -161,11 +159,9 @@ def test_resolve_known_address_tool_fake_runtime():
 
 
 def test_evm_get_erc20_balance_tool_stub():
-    rpc_path = "vault/rpc/ethereum"
     signing_path = "vault/signing/local"
-    secrets = {rpc_path: "x", signing_path: "0x" + "ff" * 32}
+    secrets = {signing_path: "0x" + "ff" * 32}
     settings = AureySettings(
-        ethereum_rpc_secret_path=rpc_path,
         wallet_signing_key_secret_path=signing_path,
     )
     runtime = AureyRuntime(
@@ -195,14 +191,34 @@ def test_alchemy_get_token_prices_tool_fake_runtime():
     settings = AureySettings(alchemy_api_secret_path="vault/alchemy")
 
     def match_prices(**kw: object) -> bool:
+        if kw.get("method") != "POST":
+            return False
         url = str(kw.get("url") or "")
-        return kw.get("method") == "GET" and "/prices/v1/" in url
+        if "/prices/v1/" not in url or "tokens/by-address" not in url:
+            return False
+        body = kw.get("json_body") or {}
+        return isinstance(body, dict) and isinstance(body.get("addresses"), list)
 
     http = ScriptedHttpClient(
         [
             (
                 match_prices,
-                {"data": {"0x2222222222222222222222222222222222222222": "3.14"}},
+                {
+                    "data": [
+                        {
+                            "network": "eth-mainnet",
+                            "address": "0x2222222222222222222222222222222222222222",
+                            "prices": [
+                                {
+                                    "currency": "USD",
+                                    "value": "3.14",
+                                    "lastUpdatedAt": "2025-01-01T00:00:00Z",
+                                }
+                            ],
+                            "error": None,
+                        }
+                    ]
+                },
             )
         ]
     )
@@ -229,11 +245,9 @@ def test_alchemy_get_token_prices_tool_fake_runtime():
 
 
 def test_request_user_input_shape_and_context():
-    rpc_path = "vault/rpc/ethereum"
     signing_path = "vault/signing/local"
-    secrets = {rpc_path: "x", signing_path: "0x" + "ff" * 32}
+    secrets = {signing_path: "0x" + "ff" * 32}
     settings = AureySettings(
-        ethereum_rpc_secret_path=rpc_path,
         wallet_signing_key_secret_path=signing_path,
     )
     runtime = AureyRuntime(
@@ -250,6 +264,34 @@ def test_request_user_input_shape_and_context():
     assert out == {"ok": True, "result": {"status": "needs_user_input", "question_count": 1}}
     pending = get_pending_user_questions()
     assert pending == [{"prompt": "Which chain?", "id": "c1"}]
+
+
+def test_tx_prepare_named_tool_ignores_legacy_kind_field():
+    signing_path = "vault/signing/local"
+    secrets = {signing_path: "0x" + "ff" * 32}
+    settings = AureySettings(wallet_signing_key_secret_path=signing_path)
+    runtime = AureyRuntime(
+        settings=settings,
+        secret_store=FakeSecretStore(secrets),
+        evm_rpc_factory=rpc_factory_from_mapping({}),
+        http=ScriptedHttpClient(),
+        tx_pipeline=DeterministicTxPipeline(),
+        lifi_base_url="https://li.quest",
+    )
+    tool = _tool_by_name(build_aurey_subgraph_tools(runtime), "tx_prepare_erc20_transfer")
+    out = tool.invoke(
+        {
+            "kind": "erc20_transfer",
+            "chain": "base",
+            "from_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "token_address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "to_address": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "amount_wei": 10_000,
+        }
+    )
+    assert out["ok"] is True
+    assert out["result"]["envelope"]["kind"] == "erc20_transfer"
+    _assert_no_banned_values(out)
 
 
 def test_tx_execute_tool_accepts_tx_execute_shape():

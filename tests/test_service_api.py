@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
@@ -48,14 +49,14 @@ def _service_state(monkeypatch) -> AureyServiceState:
             **kw,
         ),
     )
-    rpc_path = "vault/rpc/ethereum"
+    alchemy_path = "vault/alchemy"
     signing_path = "vault/signing/local"
     secrets = {
-        rpc_path: "https://rpc.example.invalid/rpc?q=SECRET_FRAGMENT_SHOULD_NOT_LEAK",
+        alchemy_path: "SECRET_FRAGMENT_SHOULD_NOT_LEAK",
         signing_path: "0x" + "ff" * 32,
     }
     settings = AureySettings(
-        ethereum_rpc_secret_path=rpc_path,
+        alchemy_api_secret_path=alchemy_path,
         wallet_signing_key_secret_path=signing_path,
     )
     runtime = AureyRuntime(
@@ -100,6 +101,28 @@ def test_invoke_returns_structured_ok(monkeypatch):
     assert payload.messages[-1]["content"] == "ok"
     blob = json.dumps(r.json(), sort_keys=True)
     assert "SECRET_FRAGMENT_SHOULD_NOT_LEAK" not in blob
+
+
+def test_invoke_logs_turn_lines(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    st = _service_state(monkeypatch)
+    with TestClient(create_fastapi_application(state=st)) as client:
+        r = client.post(
+            "/v1/invoke",
+            json={
+                "message": "hello there",
+                "session_id": "sess-logging",
+                "context": {"wallet_id": "w1"},
+            },
+        )
+    assert r.status_code == 200
+    turn_msgs = [r.getMessage() for r in caplog.records if r.name == "aurey.turn"]
+    joined = " ".join(turn_msgs)
+    assert "incoming" in joined
+    assert "session=sess-logging" in joined
+    assert "text=hello there" in joined
+    assert "complete" in joined
+    assert "preview=ok" in joined
 
 
 def test_invoke_misconfigured_returns_stable_error(monkeypatch):

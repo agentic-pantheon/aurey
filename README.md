@@ -1,11 +1,11 @@
 # Aurey
 
-Python 3.12+ scaffold for a standalone **Deep Agent** with **LangGraph**-backed tools, **Pydantic Settings**, and an optional **FastAPI** invoke API. Production wiring resolves RPC and provider material through **1Claw** (`SecretStore`); only the bootstrap API key is read from the environment variable named by `oneclaw_api_key_secret_source`.
+Python 3.12+ scaffold for a standalone **Deep Agent** with **LangGraph**-backed tools, **Pydantic Settings**, and an optional **FastAPI** invoke API. Production wiring resolves provider material through **1Claw** (`SecretStore`); EVM RPC URLs are derived from the Alchemy API key path, and only the bootstrap API key is read from the environment variable named by `oneclaw_api_key_secret_source`.
 
 ## Layout
 
 - `src/aurey/settings/` - Pydantic settings: 1Claw connection fields, **vault path** references only (never inline secrets). Bootstrap API key is read via the env var **named** by `oneclaw_api_key_secret_source` (default `AUREY_ONECLAW_BOOTSTRAP_API_KEY`).
-- `src/aurey/custody/` - `SecretStore` protocol, `SecretValue`, `OneClawHttpClient` / `OneClawSecretStore`, and in-memory `Fake*` helpers for tests.
+- `src/aurey/custody/` - `SecretStore` protocol, `SecretValue`, `OneClawHttpClient` / `OneClawSecretStore`, and in-memory `Fake`* helpers for tests.
 - `src/aurey/reasoning/` - deep agent harness and factory.
 - `src/aurey/tools/` - LangChain tool definitions.
 - `src/aurey/graphs/` - compiled subgraphs per tool.
@@ -15,31 +15,31 @@ Python 3.12+ scaffold for a standalone **Deep Agent** with **LangGraph**-backed 
 ## Setup
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
+uv sync --group dev
 ```
 
 Optional HTTP stack:
 
 ```bash
-pip install -e ".[dev,api]"
+uv sync --group dev --extra api
 ```
 
 Optional Telegram stack:
 
 ```bash
-pip install -e ".[dev,telegram]"
+uv sync --group dev --extra telegram
 ```
 
 Copy `.env.example` to `.env` and set at least `AUREY_ONECLAW_VAULT_ID` and `AUREY_ONECLAW_BOOTSTRAP_API_KEY` before running the service.
+
+For default models like `openai:gpt-4o-mini`, set `OPENAI_API_KEY` in `.env`. The project depends on `langchain-openai`; run `uv sync --group dev` after pulling so it is installed.
 
 ### Optional HTTP server
 
 After installing `aurey[api]`, run Uvicorn with the ASGI factory (builds the app after lifespan wiring):
 
 ```bash
-uvicorn aurey.service.app:app --factory --host 127.0.0.1 --port 8000
+uv run uvicorn aurey.service.app:app --factory --host 127.0.0.1 --port 8000
 ```
 
 Endpoints:
@@ -70,6 +70,7 @@ Do not place the Telegram token in `.env`; only the 1Claw path belongs in config
 ## Development
 
 ```bash
-ruff check src tests
-pytest
+uv run ruff check src tests
+uv run pytest
 ```
+

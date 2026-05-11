@@ -243,6 +243,7 @@
     "properties": {
       "envelope": {
         "additionalProperties": true,
+        "description": "Required. The exact `envelope` object from a successful `tx_prepare_*` call: `prepare_output['result']['envelope']`. Pass the dict unchanged (do not omit this field).",
         "title": "Envelope",
         "type": "object"
       },
@@ -256,6 +257,7 @@
           }
         ],
         "default": null,
+        "description": "Optional idempotency key for the execute/broadcast pipeline.",
         "title": "Idempotency Key"
       }
     },
@@ -266,6 +268,7 @@
     "type": "object"
   },
   "tx_prepare_erc20_approval": {
+    "description": "Public args for ERC-20 approval preparation; tool name supplies the kind.",
     "properties": {
       "amount_wei": {
         "minimum": 0,
@@ -280,12 +283,6 @@
       "from_address": {
         "minLength": 1,
         "title": "From Address",
-        "type": "string"
-      },
-      "kind": {
-        "const": "erc20_approval",
-        "default": "erc20_approval",
-        "title": "Kind",
         "type": "string"
       },
       "spender_address": {
@@ -306,10 +303,11 @@
       "spender_address",
       "amount_wei"
     ],
-    "title": "TxPrepareErc20Approval",
+    "title": "TxPrepareErc20ApprovalArgs",
     "type": "object"
   },
   "tx_prepare_erc20_transfer": {
+    "description": "Public args for ERC-20 transfer preparation; tool name supplies the kind.",
     "properties": {
       "amount_wei": {
         "minimum": 0,
@@ -324,12 +322,6 @@
       "from_address": {
         "minLength": 1,
         "title": "From Address",
-        "type": "string"
-      },
-      "kind": {
-        "const": "erc20_transfer",
-        "default": "erc20_transfer",
-        "title": "Kind",
         "type": "string"
       },
       "to_address": {
@@ -350,10 +342,11 @@
       "to_address",
       "amount_wei"
     ],
-    "title": "TxPrepareErc20Transfer",
+    "title": "TxPrepareErc20TransferArgs",
     "type": "object"
   },
   "tx_prepare_native_transfer": {
+    "description": "Public args for native transfer preparation; tool name supplies the kind.",
     "properties": {
       "chain": {
         "minLength": 1,
@@ -363,12 +356,6 @@
       "from_address": {
         "minLength": 1,
         "title": "From Address",
-        "type": "string"
-      },
-      "kind": {
-        "const": "native_transfer",
-        "default": "native_transfer",
-        "title": "Kind",
         "type": "string"
       },
       "to_address": {
@@ -388,7 +375,7 @@
       "to_address",
       "value_wei"
     ],
-    "title": "TxPrepareNative",
+    "title": "TxPrepareNativeArgs",
     "type": "object"
   }
 }

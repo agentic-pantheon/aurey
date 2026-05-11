@@ -24,6 +24,9 @@ AUREY_DEEP_USER_PROMPT = (
     "Rules:\n"
     "- Call tools with structured arguments only (no opaque JSON blobs).\n"
     "- Never ask the user to paste private keys or raw RPC URLs; paths are resolved server-side.\n"
+    "- After a successful `tx_prepare_*` (`ok` true), calling `tx_execute` REQUIRES the argument "
+    "`envelope` set to `result.envelope` from that prepare output, unchanged. Do not call "
+    "`tx_execute` without `envelope`.\n"
     "- Use **request_user_input** only when required fields are missing."
 )
 

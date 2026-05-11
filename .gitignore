@@ -8,6 +8,14 @@ __pycache__/
 .eggs/
 dist/
 build/
+*.egg
+*.manifest
+*.spec
+
+# Logs & local tooling
+pip-log.txt
+pip-delete-this-directory.txt
+*.log
 
 # Virtual environments
 .venv/
@@ -25,6 +33,7 @@ ENV/
 .ruff_cache/
 .coverage
 htmlcov/
+coverage.xml
 .mypy_cache/
 
 # Editors / OS

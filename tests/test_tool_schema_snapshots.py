@@ -20,12 +20,12 @@ def _normalize_schema(obj: object) -> object:
 
 def test_langchain_subgraph_tool_args_schemas_snapshot() -> None:
     settings = AureySettings(
-        ethereum_rpc_secret_path="p/rpc",
+        alchemy_api_secret_path="p/alchemy",
         wallet_signing_key_secret_path="k/sign",
     )
     runtime = AureyRuntime(
         settings=settings,
-        secret_store=FakeSecretStore({"p/rpc": "x", "k/sign": "0x1"}),
+        secret_store=FakeSecretStore({"p/alchemy": "x", "k/sign": "0x1"}),
         evm_rpc_factory=rpc_factory_from_mapping({}),
         http=ScriptedHttpClient(),
         tx_pipeline=DeterministicTxPipeline(),

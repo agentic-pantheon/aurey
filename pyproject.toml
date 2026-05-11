@@ -10,9 +10,11 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "langchain",
+    "langchain-openai",
     "langgraph",
     "deepagents>=0.5.8",
     "pydantic-settings",
+    "rich>=13.7",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +25,8 @@ api = [
 telegram = [
     "python-telegram-bot>=21",
 ]
+
+[dependency-groups]
 dev = [
     "fastapi>=0.115",
     "pytest>=8",

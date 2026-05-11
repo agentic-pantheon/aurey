@@ -42,17 +42,9 @@ class AureySettings(BaseSettings):
         description="Optional agent id for hosted token exchange flow.",
     )
 
-    ethereum_rpc_secret_path: str | None = Field(
-        default=None,
-        description="1Claw vault path for Ethereum RPC URL (never the URL itself here).",
-    )
-    base_rpc_secret_path: str | None = Field(
-        default=None,
-        description="1Claw vault path for Base RPC URL.",
-    )
     alchemy_api_secret_path: str | None = Field(
         default=None,
-        description="1Claw vault path for Alchemy API key.",
+        description="1Claw vault path for the Alchemy API key used for reads and RPC URLs.",
     )
     lifi_api_secret_path: str | None = Field(
         default=None,

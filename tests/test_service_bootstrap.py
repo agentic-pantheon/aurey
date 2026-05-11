@@ -60,10 +60,10 @@ def test_construct_service_state_get_graph_invoke_smoke(monkeypatch):
         ),
     )
 
-    rpc_path = "vault/rpc/ethereum"
+    alchemy_path = "vault/alchemy"
     signing_path = "vault/signing/local"
     settings = AureySettings(
-        ethereum_rpc_secret_path=rpc_path,
+        alchemy_api_secret_path=alchemy_path,
         wallet_signing_key_secret_path=signing_path,
         deep_agent_default_model="stub-spec",
         oneclaw_vault_id="ignored-for-fake-runtime",
@@ -72,7 +72,7 @@ def test_construct_service_state_get_graph_invoke_smoke(monkeypatch):
         settings=settings,
         secret_store=FakeSecretStore(
             {
-                rpc_path: "https://rpc.example.invalid/rpc?q=SECRET_FRAGMENT",
+                alchemy_path: "SECRET_FRAGMENT",
                 signing_path: "0x" + "ff" * 32,
             }
         ),
@@ -95,9 +95,9 @@ def test_construct_service_state_get_graph_invoke_smoke(monkeypatch):
 
 
 def test_adapters_construct_runtime_dependencies():
-    rpc_path = "rpc/path"
-    s = AureySettings(ethereum_rpc_secret_path=rpc_path)
-    store = FakeSecretStore({rpc_path: "http://ethereum.invalid"})
+    alchemy_path = "alchemy/path"
+    s = AureySettings(alchemy_api_secret_path=alchemy_path)
+    store = FakeSecretStore({alchemy_path: "alchemy-key"})
     rt = AureyRuntime(
         settings=s,
         secret_store=store,
@@ -106,6 +106,8 @@ def test_adapters_construct_runtime_dependencies():
         tx_pipeline=DeterministicTxPipeline(),
     )
     assert rt.http is not None
-    url = rt.secret_store.get_secret(rpc_path).reveal()
+    url = "https://eth-mainnet.g.alchemy.com/v2/" + rt.secret_store.get_secret(
+        alchemy_path
+    ).reveal()
     port = rt.evm_rpc_factory(url)
     assert port is not None

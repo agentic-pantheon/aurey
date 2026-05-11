@@ -1,9 +1,16 @@
-"""LangGraph: Alchemy prices, portfolio, and transfer history (HTTP + key via SecretStore)."""
+"""LangGraph: Alchemy prices, portfolio, and transfer history (HTTP + key via SecretStore).
+
+REST:
+  - Prices — POST https://api.g.alchemy.com/prices/v1/{apiKey}/tokens/by-address
+  - Portfolio ("Tokens By Wallet") — POST https://api.g.alchemy.com/data/v1/{apiKey}/assets/tokens/by-address
+
+Transfers JSON-RPC:
+  - POST https://{network}.g.alchemy.com/v2/{apiKey}  method ``alchemy_getAssetTransfers``
+"""
 
 from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
-from urllib.parse import quote
 
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field, ValidationError
@@ -20,13 +27,9 @@ from aurey.graphs.results import (
 from aurey.runtime import AureyRuntime
 
 
-def _alchemy_rpc_host(chain: str) -> str | None:
-    name = chain.strip().lower()
-    if name == "ethereum":
-        return "eth-mainnet"
-    if name == "base":
-        return "base-mainnet"
-    return None
+def _alchemy_network(chain: str) -> str | None:
+    info = chain_info(chain.strip().lower())
+    return None if info is None else info.alchemy_network
 
 
 class AlchemyGraphInput(BaseModel):
@@ -56,7 +59,7 @@ def _validate_node(state: AlchemyGraphState) -> AlchemyGraphState:
     except ValidationError as exc:
         return {"error": _validation_error(exc)}
 
-    if chain_info(parsed.chain) is None:
+    if chain_info(parsed.chain.strip().lower()) is None:
         return {
             "error": GraphErrorBody(
                 code="unsupported_chain",
@@ -112,6 +115,142 @@ def _resolve_alchemy_key(runtime: AureyRuntime) -> tuple[str | None, dict[str, A
         return None, err
 
 
+def _pick_usd_price(prices_raw: Any) -> str | None:
+    """First USD price ``value``, else first available ``value``."""
+
+    if not isinstance(prices_raw, list):
+        return None
+    fallback: str | None = None
+    for row in prices_raw:
+        if not isinstance(row, dict):
+            continue
+        val = row.get("value")
+        if val is None:
+            continue
+        sval = str(val)
+        cur = str(row.get("currency", "")).strip().upper()
+        if cur == "USD":
+            return sval
+        if fallback is None:
+            fallback = sval
+    return fallback
+
+
+def _parse_prices_payload(payload: dict[str, Any], token_addrs: list[str]) -> dict[str, str]:
+    """Map normalized contract address → price string per Prices API ``data`` array."""
+
+    rows = payload.get("data")
+    if isinstance(rows, dict):
+        rows = rows.get("prices") or rows.get("results")
+    if not isinstance(rows, list):
+        return {}
+
+    want = {normalize_evm_address(a) for a in token_addrs}
+    out: dict[str, str] = {}
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            addr = normalize_evm_address(str(row.get("address") or ""))
+        except ValueError:
+            continue
+        if want and addr not in want:
+            continue
+        err = row.get("error")
+        if err:
+            out[addr] = f"<error:{err}>"
+            continue
+        price = _pick_usd_price(row.get("prices"))
+        if price is not None:
+            out[addr] = price
+
+    return out
+
+
+def _parse_portfolio_tokens(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Portfolio API nests tokens under ``data.tokens``."""
+
+    data = payload.get("data")
+    if isinstance(data, dict):
+        tokens = data.get("tokens")
+        if isinstance(tokens, list):
+            return [dict(x) for x in tokens if isinstance(x, dict)]
+        return []
+    return []
+
+
+def _transfer_param_block(
+    wallet: str,
+    *,
+    direction: Literal["from", "to"],
+) -> dict[str, Any]:
+    block: dict[str, Any] = {
+        "fromBlock": "0x0",
+        "toBlock": "latest",
+        "category": ["external", "erc20"],
+        "withMetadata": True,
+        "excludeZeroValue": True,
+        "maxCount": "0x64",
+        "order": "desc",
+    }
+    if direction == "from":
+        block["fromAddress"] = wallet
+    else:
+        block["toAddress"] = wallet
+    return block
+
+
+def _post_asset_transfers(
+    runtime: AureyRuntime,
+    *,
+    rpc_url: str,
+    param_block: dict[str, Any],
+) -> list[dict[str, Any]]:
+    req = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "alchemy_getAssetTransfers",
+        "params": [param_block],
+    }
+    body = runtime.http.request_json(
+        method="POST",
+        url=rpc_url,
+        headers={"Content-Type": "application/json"},
+        json_body=req,
+    )
+    rpc_result = body.get("result") or {}
+    if isinstance(rpc_result, str):
+        return []
+    transfers = rpc_result.get("transfers")
+    if transfers is None:
+        transfers = []
+    if not isinstance(transfers, list):
+        raise ValueError("unexpected transfers shape")
+    return [dict(row) for row in transfers if isinstance(row, dict)]
+
+
+def _merge_transfer_rows(
+    rows_a: list[dict[str, Any]],
+    rows_b: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    by_uid: dict[str, dict[str, Any]] = {}
+    for row in rows_a + rows_b:
+        uid = str(row.get("uniqueId") or "")
+        key = uid if uid else str(id(row))
+        by_uid.setdefault(key, row)
+
+    def sort_key(row: dict[str, Any]) -> int:
+        raw = row.get("blockNum", "0x0")
+        try:
+            return int(str(raw), 16)
+        except ValueError:
+            return 0
+
+    merged = sorted(by_uid.values(), key=sort_key, reverse=True)
+    return merged
+
+
 def _execute_node(runtime: AureyRuntime, state: AlchemyGraphState) -> AlchemyGraphState:
     if state.get("error"):
         return {}
@@ -123,75 +262,67 @@ def _execute_node(runtime: AureyRuntime, state: AlchemyGraphState) -> AlchemyGra
     assert api_key is not None
 
     chain = parsed.chain.strip().lower()
+    network = _alchemy_network(chain)
+    if network is None:
+        return {
+            "error": GraphErrorBody(
+                code="unsupported_chain",
+                message="No Alchemy network mapping for this chain.",
+                details={"chain": chain},
+            ).model_dump()
+        }
+
     wallet = normalize_evm_address(parsed.wallet_address)
+    hdr_json = {"Content-Type": "application/json"}
 
     try:
         if parsed.operation == "token_prices":
-            addrs = [normalize_evm_address(a) for a in (parsed.token_addresses or [])]
-            joined = "%2C".join(quote(a, safe="") for a in addrs)
-            url = f"https://api.g.alchemy.com/prices/v1/{api_key}/tokens/by-address?addresses={joined}"
-            payload = runtime.http.request_json(method="GET", url=url, headers=None, json_body=None)
-            raw_prices = payload.get("data") or payload.get("prices") or {}
-            if not isinstance(raw_prices, dict):
-                raise ValueError("unexpected prices shape")
-            prices: dict[str, str] = {}
-            for k, v in raw_prices.items():
-                prices[str(k)] = str(v)
+            addrs_norm = [normalize_evm_address(a) for a in (parsed.token_addresses or [])]
+            url = f"https://api.g.alchemy.com/prices/v1/{api_key}/tokens/by-address"
+            payload = runtime.http.request_json(
+                method="POST",
+                url=url,
+                headers=hdr_json,
+                json_body={
+                    "addresses": [{"network": network, "address": a} for a in addrs_norm],
+                },
+            )
+            if not isinstance(payload, dict):
+                raise ValueError("unexpected prices envelope")
+            prices = _parse_prices_payload(payload, addrs_norm)
             result = AlchemyTokenPricesResult(chain=chain, prices_by_address=prices)
             return {"result": result.model_dump()}
 
         if parsed.operation == "portfolio_tokens":
-            enc_wallet = quote(wallet, safe="")
-            url = f"https://api.g.alchemy.com/portfolio/v1/{api_key}/wallets/{enc_wallet}/tokens"
-            payload = runtime.http.request_json(method="GET", url=url, headers=None, json_body=None)
-            tokens = payload.get("tokens")
-            if not isinstance(tokens, list):
-                tokens = payload.get("data") if isinstance(payload.get("data"), list) else []
-            if not isinstance(tokens, list):
-                raise ValueError("unexpected portfolio shape")
+            url = f"https://api.g.alchemy.com/data/v1/{api_key}/assets/tokens/by-address"
+            payload = runtime.http.request_json(
+                method="POST",
+                url=url,
+                headers=hdr_json,
+                json_body={
+                    "addresses": [{"address": wallet, "networks": [network]}],
+                    "withMetadata": True,
+                    "withPrices": True,
+                    "includeNativeTokens": True,
+                    "includeErc20Tokens": True,
+                },
+            )
+            tokens = _parse_portfolio_tokens(payload if isinstance(payload, dict) else {})
             result = AlchemyPortfolioResult(chain=chain, wallet_address=wallet, tokens=tokens)
             return {"result": result.model_dump()}
 
-        host = _alchemy_rpc_host(chain)
-        if host is None:
-            return {
-                "error": GraphErrorBody(
-                    code="unsupported_chain",
-                    message="No Alchemy network mapping for this chain.",
-                    details={"chain": chain},
-                ).model_dump()
-            }
-
-        rpc_url = f"https://{host}.g.alchemy.com/v2/{api_key}"
-        req = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "alchemy_getAssetTransfers",
-            "params": [
-                {
-                    "fromBlock": "0x0",
-                    "toBlock": "latest",
-                    "category": ["external", "erc20"],
-                    "withMetadata": False,
-                    "excludeZeroValue": True,
-                    "maxCount": "0x64",
-                    "fromAddress": wallet,
-                }
-            ],
-        }
-        body = runtime.http.request_json(
-            method="POST", url=rpc_url, headers={"Content-Type": "application/json"}, json_body=req
+        rpc_url = f"https://{network}.g.alchemy.com/v2/{api_key}"
+        sent = _post_asset_transfers(
+            runtime,
+            rpc_url=rpc_url,
+            param_block=_transfer_param_block(wallet, direction="from"),
         )
-        rpc_result = body.get("result") or {}
-        transfers = rpc_result.get("transfers")
-        if transfers is None:
-            transfers = []
-        if not isinstance(transfers, list):
-            raise ValueError("unexpected transfers shape")
-        xfer_models: list[dict[str, Any]] = []
-        for row in transfers:
-            if isinstance(row, dict):
-                xfer_models.append(dict(row))
+        received = _post_asset_transfers(
+            runtime,
+            rpc_url=rpc_url,
+            param_block=_transfer_param_block(wallet, direction="to"),
+        )
+        xfer_models = _merge_transfer_rows(sent, received)
         result = AlchemyTransferHistoryResult(
             chain=chain, wallet_address=wallet, transfers=xfer_models
         )

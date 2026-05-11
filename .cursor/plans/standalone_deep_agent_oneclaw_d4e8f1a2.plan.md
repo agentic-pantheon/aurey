@@ -91,7 +91,7 @@ flowchart LR
 **Contract (mirror Mercury):**
 
 - Settings fields: `oneclaw_base_url`, `oneclaw_vault_id`, `oneclaw_api_key_secret_source` (env **name** holding bootstrap API key), optional `oneclaw_agent_id`.
-- All other secrets (RPC, provider keys, wallet key paths) are **string paths** in settings, e.g. `ethereum_rpc_secret_path`, resolved at use time via `SecretStore.get_secret(path).reveal()` inside non-LLM code only.
+- All other secrets (provider keys, wallet key paths, Telegram token) are **string paths** in settings. EVM RPC URLs are derived from the shared `alchemy_api_secret_path`, e.g. `https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_KEY}`, with values resolved at use time via `SecretStore.get_secret(path).reveal()` inside non-LLM code only.
 - Typed wrapper `SecretValue` with `reveal()`; **never** log or return revealed values; redact in errors (see Mercury’s logging patterns).
 
 **Testing:** provide `FakeSecretStore` / `FakeOneClawClient` for unit tests (same idea as [`tests/fakes/secret_store.py`](file:///Users/fabri/agentic-pantheon/mercury-agentic-wallet/tests/fakes/secret_store.py)).

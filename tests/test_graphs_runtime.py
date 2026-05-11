@@ -52,26 +52,38 @@ def _assert_no_banned_values(payload: object) -> None:
 
 
 def test_read_native_balance_graph():
-    rpc_path = "vault/rpc/ethereum"
+    alchemy_path = "vault/alchemy/1"
     signing_path = "vault/signing/local"
     secrets = {
-        rpc_path: "https://rpc.example.invalid/rpc?q=INJECTED_RPC_URL_SECRET_FRAGMENT",
-        "vault/alchemy/1": "INJECTED_ALCHEMY_KEY_AAA",
+        alchemy_path: "INJECTED_ALCHEMY_KEY_AAA",
         "vault/lifi/1": "INJECTED_LIFI_KEY_BBB",
         signing_path: "0x" + "ff" * 32,
     }
     settings = AureySettings(
-        ethereum_rpc_secret_path=rpc_path,
-        alchemy_api_secret_path="vault/alchemy/1",
+        alchemy_api_secret_path=alchemy_path,
         lifi_api_secret_path="vault/lifi/1",
         wallet_signing_key_secret_path=signing_path,
     )
     http = ScriptedHttpClient()
+    rpc_urls: list[str] = []
+
+    def rpc_factory(url: str):
+        rpc_urls.append(url)
+        return rpc_factory_from_mapping({"eth_getBalance": "0x10"})(url)
+
     runtime = _runtime(
         secrets=secrets,
         settings=settings,
         http=http,
-        rpc_map={"eth_getBalance": "0x10"},
+        rpc_map={},
+    )
+    runtime = AureyRuntime(
+        settings=runtime.settings,
+        secret_store=runtime.secret_store,
+        evm_rpc_factory=rpc_factory,
+        http=runtime.http,
+        tx_pipeline=runtime.tx_pipeline,
+        lifi_base_url=runtime.lifi_base_url,
     )
     graph = build_read_graph(runtime)
     out = graph.invoke(
@@ -85,12 +97,13 @@ def test_read_native_balance_graph():
     )
     assert out.get("error") is None
     assert out["result"]["balance_wei_hex"] == "0x10"
+    assert rpc_urls == ["https://eth-mainnet.g.alchemy.com/v2/INJECTED_ALCHEMY_KEY_AAA"]
     _assert_no_banned_values(out)
 
 
 def test_read_known_address_graph():
-    secrets = {"p/rpc": "x"}
-    settings = AureySettings(ethereum_rpc_secret_path="p/rpc")
+    secrets = {}
+    settings = AureySettings()
     runtime = _runtime(
         secrets=secrets,
         settings=settings,
@@ -110,14 +123,34 @@ def test_alchemy_token_prices_graph():
     settings = AureySettings(alchemy_api_secret_path="vault/alchemy")
 
     def match_prices(**kw: object) -> bool:
+        if kw.get("method") != "POST":
+            return False
         url = str(kw.get("url") or "")
-        return kw.get("method") == "GET" and "/prices/v1/" in url
+        if "/prices/v1/" not in url or "tokens/by-address" not in url:
+            return False
+        body = kw.get("json_body") or {}
+        return isinstance(body, dict) and isinstance(body.get("addresses"), list)
 
     http = ScriptedHttpClient(
         [
             (
                 match_prices,
-                {"data": {"0x2222222222222222222222222222222222222222": "3.14"}},
+                {
+                    "data": [
+                        {
+                            "network": "eth-mainnet",
+                            "address": "0x2222222222222222222222222222222222222222",
+                            "prices": [
+                                {
+                                    "currency": "USD",
+                                    "value": "3.14",
+                                    "lastUpdatedAt": "2025-01-01T00:00:00Z",
+                                }
+                            ],
+                            "error": None,
+                        }
+                    ]
+                },
             )
         ]
     )
@@ -149,21 +182,67 @@ def test_alchemy_portfolio_and_transfers_graphs():
     wallet = "0x1111111111111111111111111111111111111111"
 
     def match_portfolio(**kw: object) -> bool:
-        return kw.get("method") == "GET" and "/portfolio/v1/" in str(kw.get("url") or "")
+        if kw.get("method") != "POST":
+            return False
+        u = str(kw.get("url") or "")
+        return "/data/v1/" in u and "assets/tokens/by-address" in u
 
-    def match_transfers(**kw: object) -> bool:
+    def match_transfers_from(**kw: object) -> bool:
         body = kw.get("json_body") or {}
+        params = body.get("params") if isinstance(body, dict) else None
+        block = params[0] if isinstance(params, list) and params else {}
         return (
             kw.get("method") == "POST"
             and ".g.alchemy.com/v2/" in str(kw.get("url") or "")
             and isinstance(body, dict)
             and body.get("method") == "alchemy_getAssetTransfers"
+            and isinstance(block, dict)
+            and "fromAddress" in block
+        )
+
+    def match_transfers_to(**kw: object) -> bool:
+        body = kw.get("json_body") or {}
+        params = body.get("params") if isinstance(body, dict) else None
+        block = params[0] if isinstance(params, list) and params else {}
+        return (
+            kw.get("method") == "POST"
+            and ".g.alchemy.com/v2/" in str(kw.get("url") or "")
+            and isinstance(body, dict)
+            and body.get("method") == "alchemy_getAssetTransfers"
+            and isinstance(block, dict)
+            and "toAddress" in block
         )
 
     http = ScriptedHttpClient(
         [
-            (match_portfolio, {"tokens": [{"symbol": "ETH", "balance": "1"}]}),
-            (match_transfers, {"result": {"transfers": [{"uniqueId": "t1"}]}}),
+            (
+                match_portfolio,
+                {
+                    "data": {
+                        "tokens": [
+                            {
+                                "address": wallet,
+                                "network": "base-mainnet",
+                                "tokenAddress": None,
+                                "tokenBalance": "1000000000000000000",
+                                "tokenMetadata": {
+                                    "decimals": 18,
+                                    "symbol": "ETH",
+                                    "name": "Ether",
+                                },
+                            }
+                        ]
+                    }
+                },
+            ),
+            (
+                match_transfers_from,
+                {"result": {"transfers": [{"uniqueId": "t-high", "blockNum": "0x10"}]}},
+            ),
+            (
+                match_transfers_to,
+                {"result": {"transfers": [{"uniqueId": "t-low", "blockNum": "0x5"}]}},
+            ),
         ]
     )
     runtime = _runtime(secrets=secrets, settings=settings, http=http, rpc_map={})
@@ -177,7 +256,7 @@ def test_alchemy_portfolio_and_transfers_graphs():
             }
         }
     )
-    assert portfolio["result"]["tokens"][0]["symbol"] == "ETH"
+    assert portfolio["result"]["tokens"][0]["tokenMetadata"]["symbol"] == "ETH"
     _assert_no_banned_values(portfolio)
 
     transfers = build_alchemy_graph(runtime).invoke(
@@ -189,7 +268,8 @@ def test_alchemy_portfolio_and_transfers_graphs():
             }
         }
     )
-    assert transfers["result"]["transfers"][0]["uniqueId"] == "t1"
+    assert transfers["result"]["transfers"][0]["uniqueId"] == "t-high"
+    assert {t["uniqueId"] for t in transfers["result"]["transfers"]} == {"t-high", "t-low"}
     _assert_no_banned_values(transfers)
 
 
@@ -246,11 +326,9 @@ def test_swap_prepare_graph():
 def test_tx_prepare_and_execute_native_roundtrip():
     signing_path = "vault/signing/local"
     secrets = {
-        "p/rpc": "unused",
         signing_path: "0x" + "ff" * 32,
     }
     settings = AureySettings(
-        ethereum_rpc_secret_path="p/rpc",
         wallet_signing_key_secret_path=signing_path,
     )
     runtime = _runtime(secrets=secrets, settings=settings, http=ScriptedHttpClient(), rpc_map={})

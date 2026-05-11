@@ -4,19 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from aurey.settings import AureySettings
-
 
 @dataclass(frozen=True)
 class ChainInfo:
     name: str
     chain_id: int
-    rpc_secret_settings_attr: str
+    alchemy_network: str
 
 
 CHAIN_INDEX: dict[str, ChainInfo] = {
-    "ethereum": ChainInfo("ethereum", 1, "ethereum_rpc_secret_path"),
-    "base": ChainInfo("base", 8453, "base_rpc_secret_path"),
+    "ethereum": ChainInfo("ethereum", 1, "eth-mainnet"),
+    "base": ChainInfo("base", 8453, "base-mainnet"),
 }
 
 
@@ -25,11 +23,11 @@ def chain_info(name: str) -> ChainInfo | None:
     return CHAIN_INDEX.get(key)
 
 
-def rpc_secret_path_for_chain(settings: AureySettings, name: str) -> str | None:
+def alchemy_rpc_url_for_chain(name: str, api_key: str) -> str | None:
     info = chain_info(name)
     if info is None:
         return None
-    return getattr(settings, info.rpc_secret_settings_attr)
+    return f"https://{info.alchemy_network}.g.alchemy.com/v2/{api_key}"
 
 
 def chain_id_for(name: str) -> int | None:

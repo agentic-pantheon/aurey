@@ -8,7 +8,7 @@ from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field, ValidationError
 
 from aurey.custody.errors import SecretNotFoundError, SecretStoreUnavailableError
-from aurey.graphs.chains import chain_id_for, chain_info, rpc_secret_path_for_chain
+from aurey.graphs.chains import alchemy_rpc_url_for_chain, chain_id_for, chain_info
 from aurey.graphs.evm_codec import normalize_evm_address
 from aurey.graphs.results import (
     Erc20ReadPlaceholder,
@@ -143,36 +143,46 @@ def _execute_node(runtime: AureyRuntime, state: ReadGraphState) -> ReadGraphStat
         )
         return {"result": placeholder.model_dump()}
 
-    rpc_path = rpc_secret_path_for_chain(runtime.settings, chain)
-    if not rpc_path:
+    alchemy_path = runtime.settings.alchemy_api_secret_path
+    if not alchemy_path:
         return {
             "error": GraphErrorBody(
                 code="secret_not_configured",
-                message="RPC secret path is not configured for this chain.",
+                message="Alchemy API secret path is not configured.",
                 details={"chain": chain},
             ).model_dump()
         }
 
     try:
-        rpc_url = runtime.secret_store.get_secret(rpc_path).reveal()
+        alchemy_key = runtime.secret_store.get_secret(alchemy_path).reveal()
     except SecretNotFoundError:
         return {
             "error": GraphErrorBody(
                 code="secret_not_found",
-                message="RPC secret path could not be resolved.",
-                details={"secret_kind": "rpc"},
+                message="Alchemy API secret could not be resolved.",
+                details={"secret_kind": "alchemy_api"},
             ).model_dump()
         }
     except SecretStoreUnavailableError:
         return {
             "error": GraphErrorBody(
                 code="secret_unavailable",
-                message="Secret store unavailable while resolving RPC.",
-                details={"secret_kind": "rpc"},
+                message="Secret store unavailable while resolving Alchemy API key.",
+                details={"secret_kind": "alchemy_api"},
             ).model_dump()
         }
 
-    # rpc_url is intentionally kept out of graph state and outputs.
+    rpc_url = alchemy_rpc_url_for_chain(chain, alchemy_key)
+    if rpc_url is None:
+        return {
+            "error": GraphErrorBody(
+                code="unsupported_chain",
+                message="No Alchemy RPC mapping for this chain.",
+                details={"chain": chain},
+            ).model_dump()
+        }
+
+    # The derived RPC URL contains the Alchemy key and is kept out of graph state and outputs.
     try:
         rpc = runtime.evm_rpc_factory(rpc_url)
         wallet = normalize_evm_address(parsed.wallet_address or "")

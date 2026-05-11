@@ -2,17 +2,110 @@
 
 from __future__ import annotations
 
+import html
+import re
 from typing import Any
 
 from aurey.custody.errors import SecretNotFoundError, SecretStoreUnavailableError
 from aurey.service.bootstrap import bootstrap_aurey_service_state
 from aurey.service.invoke import AgentInvokeResult, invoke_deep_agent_turn
+from aurey.service.message_content import reply_preview_from_summary
 from aurey.service.state import AureyServiceState
 from aurey.settings import AureySettings
 
 
 class TelegramConfigurationError(RuntimeError):
     """Telegram setup failed without exposing token paths or values."""
+
+
+_TELEGRAM_MAX_MESSAGE_CHARS = 4096
+_TELEGRAM_CHUNK_TARGET_CHARS = 3600
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+
+
+def _format_inline_markdown(text: str) -> str:
+    """Small Markdown subset to Telegram HTML, after escaping user/model text."""
+
+    escaped = html.escape(text, quote=False)
+    escaped = _INLINE_CODE_RE.sub(lambda m: f"<code>{m.group(1)}</code>", escaped)
+    escaped = _BOLD_RE.sub(lambda m: f"<b>{m.group(1)}</b>", escaped)
+    return escaped
+
+
+def format_telegram_message(text: str) -> str:
+    """Render common agent Markdown as Telegram-safe HTML.
+
+    The model speaks mostly Markdown; Telegram's HTML parse mode is stricter but safer
+    than MarkdownV2 because we escape first and only then add a small allowed tag set.
+    """
+
+    out: list[str] = []
+    in_code = False
+    code_lines: list[str] = []
+
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if line.strip().startswith("```"):
+            if in_code:
+                out.append(f"<pre>{html.escape(chr(10).join(code_lines), quote=False)}</pre>")
+                code_lines = []
+                in_code = False
+            else:
+                in_code = True
+            continue
+
+        if in_code:
+            code_lines.append(line)
+            continue
+
+        stripped = line.strip()
+        if stripped.startswith("### "):
+            out.append(f"<b>{_format_inline_markdown(stripped[4:])}</b>")
+        elif stripped.startswith("## "):
+            out.append(f"<b>{_format_inline_markdown(stripped[3:])}</b>")
+        elif stripped.startswith("# "):
+            out.append(f"<b>{_format_inline_markdown(stripped[2:])}</b>")
+        else:
+            out.append(_format_inline_markdown(line))
+
+    if in_code:
+        out.append(f"<pre>{html.escape(chr(10).join(code_lines), quote=False)}</pre>")
+
+    return "\n".join(out).strip() or "Done."
+
+
+def telegram_message_chunks(text: str) -> list[str]:
+    """Split raw text before HTML formatting so tags are never cut in half."""
+
+    if len(text) <= _TELEGRAM_MAX_MESSAGE_CHARS:
+        return [text]
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for paragraph in text.split("\n\n"):
+        part_len = len(paragraph) + (2 if current else 0)
+        if current and current_len + part_len > _TELEGRAM_CHUNK_TARGET_CHARS:
+            chunks.append("\n\n".join(current))
+            current = []
+            current_len = 0
+
+        if len(paragraph) > _TELEGRAM_CHUNK_TARGET_CHARS:
+            if current:
+                chunks.append("\n\n".join(current))
+                current = []
+                current_len = 0
+            for i in range(0, len(paragraph), _TELEGRAM_CHUNK_TARGET_CHARS):
+                chunks.append(paragraph[i : i + _TELEGRAM_CHUNK_TARGET_CHARS])
+            continue
+
+        current.append(paragraph)
+        current_len += part_len
+
+    if current:
+        chunks.append("\n\n".join(current))
+    return chunks or ["Done."]
 
 
 def resolve_telegram_bot_token(state: AureyServiceState) -> str:
@@ -30,12 +123,8 @@ def resolve_telegram_bot_token(state: AureyServiceState) -> str:
 
 
 def _last_text_message(result: AgentInvokeResult) -> str:
-    if result.messages:
-        for row in reversed(result.messages):
-            content = row.get("content")
-            if isinstance(content, str) and content.strip():
-                return content
-    return "Done."
+    text = reply_preview_from_summary(result.messages)
+    return text if text else "Done."
 
 
 def handle_telegram_text(
@@ -116,7 +205,12 @@ def build_telegram_application(
             text=msg.text,
             model=model,
         )
-        await msg.reply_text(reply)
+        for chunk in telegram_message_chunks(reply):
+            await msg.reply_text(
+                format_telegram_message(chunk),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
 
     app = Application.builder().token(bot_token).build()
     app.add_handler(CommandHandler("start", start))
@@ -140,6 +234,8 @@ __all__ = [
     "TelegramConfigurationError",
     "build_telegram_application",
     "create_telegram_application",
+    "format_telegram_message",
     "handle_telegram_text",
     "resolve_telegram_bot_token",
+    "telegram_message_chunks",
 ]

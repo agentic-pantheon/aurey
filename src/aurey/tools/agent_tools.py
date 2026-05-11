@@ -57,8 +57,47 @@ class AlchemyTransferHistoryArgs(BaseModel):
 class TxExecuteToolArgs(BaseModel):
     """Simulate/policy/sign/broadcast for a typed prepare envelope."""
 
-    envelope: dict[str, Any]
-    idempotency_key: str | None = None
+    envelope: dict[str, Any] = Field(
+        ...,
+        description=(
+            "Required. The exact `envelope` object from a successful `tx_prepare_*` call: "
+            "`prepare_output['result']['envelope']`. "
+            "Pass the dict unchanged (do not omit this field)."
+        ),
+    )
+    idempotency_key: str | None = Field(
+        default=None,
+        description="Optional idempotency key for the execute/broadcast pipeline.",
+    )
+
+
+class TxPrepareNativeArgs(BaseModel):
+    """Public args for native transfer preparation; tool name supplies the kind."""
+
+    chain: str = Field(min_length=1)
+    from_address: str = Field(min_length=1)
+    to_address: str = Field(min_length=1)
+    value_wei: int = Field(ge=0)
+
+
+class TxPrepareErc20TransferArgs(BaseModel):
+    """Public args for ERC-20 transfer preparation; tool name supplies the kind."""
+
+    chain: str = Field(min_length=1)
+    from_address: str = Field(min_length=1)
+    token_address: str = Field(min_length=1)
+    to_address: str = Field(min_length=1)
+    amount_wei: int = Field(ge=0)
+
+
+class TxPrepareErc20ApprovalArgs(BaseModel):
+    """Public args for ERC-20 approval preparation; tool name supplies the kind."""
+
+    chain: str = Field(min_length=1)
+    from_address: str = Field(min_length=1)
+    token_address: str = Field(min_length=1)
+    spender_address: str = Field(min_length=1)
+    amount_wei: int = Field(ge=0)
 
 
 class EvmGetNativeBalanceArgs(BaseModel):
@@ -221,14 +260,18 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
 
     tools.append(swap_prepare)
 
-    @tool(args_schema=TxPrepareNative)
+    @tool(args_schema=TxPrepareNativeArgs)
     def tx_prepare_native_transfer(
         chain: str,
         from_address: str,
         to_address: str,
         value_wei: int,
     ) -> dict[str, Any]:
-        """Prepare native gas-token transfer envelope (signing path only, no key material)."""
+        """Prepare native gas-token transfer envelope (signing path only, no key material).
+
+        On success (`ok` true), broadcast with `tx_execute(envelope=result['envelope'])` using that
+        dict verbatim.
+        """
         payload = TxPrepareNative(
             chain=chain,
             from_address=from_address,
@@ -239,7 +282,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
 
     tools.append(tx_prepare_native_transfer)
 
-    @tool(args_schema=TxPrepareErc20Transfer)
+    @tool(args_schema=TxPrepareErc20TransferArgs)
     def tx_prepare_erc20_transfer(
         chain: str,
         from_address: str,
@@ -247,7 +290,11 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         to_address: str,
         amount_wei: int,
     ) -> dict[str, Any]:
-        """Prepare ERC-20 transfer envelope."""
+        """Prepare ERC-20 transfer envelope.
+
+        On success (`ok` true), call `tx_execute(envelope=result['envelope'])` with the returned
+        envelope object unchanged. Never call `tx_execute` without `envelope`.
+        """
         payload = TxPrepareErc20Transfer(
             chain=chain,
             from_address=from_address,
@@ -259,7 +306,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
 
     tools.append(tx_prepare_erc20_transfer)
 
-    @tool(args_schema=TxPrepareErc20Approval)
+    @tool(args_schema=TxPrepareErc20ApprovalArgs)
     def tx_prepare_erc20_approval(
         chain: str,
         from_address: str,
@@ -267,7 +314,11 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         spender_address: str,
         amount_wei: int,
     ) -> dict[str, Any]:
-        """Prepare ERC-20 approval envelope."""
+        """Prepare ERC-20 approval envelope.
+
+        On success (`ok` true), broadcast with `tx_execute(envelope=result['envelope'])` using that
+        dict verbatim.
+        """
         payload = TxPrepareErc20Approval(
             chain=chain,
             from_address=from_address,
@@ -284,7 +335,12 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         envelope: dict[str, Any],
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Run simulate/policy/sign/broadcast for a typed envelope."""
+        """Run simulate/policy/sign/broadcast for a prepared transaction envelope.
+
+        You MUST pass `envelope`: the exact `result.envelope` dict from the latest successful
+        `tx_prepare_native_transfer`, `tx_prepare_erc20_transfer`, or `tx_prepare_erc20_approval`
+        tool output. Omitting `envelope` is invalid.
+        """
         root = TxExecuteToolArgs(envelope=envelope, idempotency_key=idempotency_key)
         execute_in = TxExecuteInput.model_validate(root.model_dump()).model_dump()
         return _graph_payload(execute_g.invoke({"input": execute_in}))
@@ -310,6 +366,9 @@ __all__ = [
     "EvmGetNativeBalanceArgs",
     "ResolveKnownAddressArgs",
     "SwapPrepareInput",
+    "TxPrepareErc20ApprovalArgs",
+    "TxPrepareErc20TransferArgs",
+    "TxPrepareNativeArgs",
     "TxPrepareErc20Approval",
     "TxPrepareErc20Transfer",
     "TxPrepareNative",

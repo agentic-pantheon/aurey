@@ -16,8 +16,10 @@ from aurey.service.state import AureyServiceState
 from aurey.settings import AureySettings
 from aurey.telegram import (
     TelegramConfigurationError,
+    format_telegram_message,
     handle_telegram_text,
     resolve_telegram_bot_token,
+    telegram_message_chunks,
 )
 from tests.fakes.evm_rpc import rpc_factory_from_mapping
 from tests.fakes.http_client import ScriptedHttpClient
@@ -43,6 +45,8 @@ class _RecordingGraph:
 
 
 class _FakeServiceState:
+    default_model = "stub-model"
+
     def __init__(self, graph: _RecordingGraph) -> None:
         self.graph = graph
         self.model: str | None = None
@@ -108,6 +112,27 @@ def test_handle_telegram_text_sanitizes_agent_errors() -> None:
     assert "agent_invoke_failed" in reply
     assert FAKE_ERROR_BODY_SECRET not in reply
     assert_no_sensitive_leakage({"reply": reply})
+
+
+def test_format_telegram_message_renders_common_markdown_as_html() -> None:
+    raw = "**Title**\n\nUse `code` and <unsafe>.\n\n```python\nprint('<x>')\n```"
+
+    formatted = format_telegram_message(raw)
+
+    assert "<b>Title</b>" in formatted
+    assert "<code>code</code>" in formatted
+    assert "&lt;unsafe&gt;" in formatted
+    assert "<pre>print('&lt;x&gt;')</pre>" in formatted
+
+
+def test_telegram_message_chunks_splits_long_text_before_formatting() -> None:
+    raw = "a" * 5000
+
+    chunks = telegram_message_chunks(raw)
+
+    assert len(chunks) == 2
+    assert "".join(chunks) == raw
+    assert all(len(c) <= 3600 for c in chunks)
 
 
 def test_resolve_telegram_bot_token_uses_secret_store() -> None:
