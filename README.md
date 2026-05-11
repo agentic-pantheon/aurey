@@ -1,6 +1,6 @@
 # Aurey
 
-Python 3.12+ service scaffold for a standalone **Deep Agent** with **LangGraph**-backed tools and **Pydantic Settings**. Runtime wiring (1Claw secret store, FastAPI) is introduced in follow-up work.
+Python 3.12+ scaffold for a standalone **Deep Agent** with **LangGraph**-backed tools, **Pydantic Settings**, and an optional **FastAPI** invoke API. Production wiring resolves RPC and provider material through **1Claw** (`SecretStore`); only the bootstrap API key is read from the environment variable named by `oneclaw_api_key_secret_source`.
 
 ## Layout
 
@@ -9,6 +9,7 @@ Python 3.12+ service scaffold for a standalone **Deep Agent** with **LangGraph**
 - `src/aurey/reasoning/` - deep agent harness and factory.
 - `src/aurey/tools/` - LangChain tool definitions.
 - `src/aurey/graphs/` - compiled subgraphs per tool.
+- `src/aurey/service/` - optional HTTP boundary (`bootstrap`, adapters, `FastAPI` app, DI helpers).
 
 ## Setup
 
@@ -24,7 +25,22 @@ Optional HTTP stack:
 pip install -e ".[dev,api]"
 ```
 
-Copy `.env.example` to `.env` and adjust placeholders as integration lands.
+Copy `.env.example` to `.env` and set at least `AUREY_ONECLAW_VAULT_ID` and `AUREY_ONECLAW_BOOTSTRAP_API_KEY` before running the service.
+
+### Optional HTTP server
+
+After installing `aurey[api]`, run Uvicorn with the ASGI factory (builds the app after lifespan wiring):
+
+```bash
+uvicorn aurey.service.app:app --factory --host 127.0.0.1 --port 8000
+```
+
+Endpoints:
+
+- `GET /health` - liveness (`{"ok": true}`).
+- `POST /v1/invoke` - JSON body: `message`, `session_id`, optional `context` (stored under configurable `aurey_context`), optional `model`. Responses are structured (`InvokeResponse`); misconfiguration and agent failures use stable error codes without embedding secrets.
+
+For tests, inject `state=` into `create_fastapi_application` or monkeypatch `create_aurey_deep_agent` so no live model or network is required.
 
 ## Development
 

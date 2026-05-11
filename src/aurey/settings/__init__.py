@@ -62,6 +62,10 @@ class AureySettings(BaseSettings):
         default=None,
         description="1Claw vault path for signing material.",
     )
+    deep_agent_default_model: str = Field(
+        default="openai:gpt-4o-mini",
+        description="Default Deep Agents model spec when the HTTP API omits ``model``.",
+    )
 
     def resolve_oneclaw_bootstrap_api_key(self) -> str:
         """Return bootstrap API key from the env named by ``oneclaw_api_key_secret_source``."""

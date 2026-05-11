@@ -21,6 +21,7 @@ api = [
     "uvicorn[standard]",
 ]
 dev = [
+    "fastapi>=0.115",
     "pytest>=8",
     "ruff>=0.8",
 ]
