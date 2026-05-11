@@ -1,4 +1,4 @@
-"""LangGraph: simulate/policy/sign/broadcast stub pipeline for prepared envelopes."""
+"""LangGraph: validate and execute prepared envelopes via :class:`~aurey.runtime.AureyRuntime`."""
 
 from __future__ import annotations
 

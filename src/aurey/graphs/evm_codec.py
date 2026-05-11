@@ -35,3 +35,51 @@ def erc20_transfer_data(to: str, amount_wei: int) -> str:
 
 def erc20_approve_data(spender: str, amount_wei: int) -> str:
     return "0x095ea7b3" + _pad_addr(spender) + _pad_uint256(amount_wei)
+
+
+# ERC-20 `decimals()` selector — keccak256("decimals()")[:4]
+ERC20_DECIMALS_CALLDATA = "0x313ce567"
+
+
+def decode_abi_uint256_word(result_hex: str) -> int:
+    """Decode one 32-byte ABI word returned from ``eth_call`` (hex string)."""
+
+    raw = (result_hex or "").strip().lower()
+    if not raw.startswith("0x") or len(raw) != 66:
+        raise ValueError("eth_call result must be a 32-byte ABI word (0x + 64 hex chars).")
+    return int(raw, 16)
+
+
+def parse_evm_uint(value: str | int) -> int:
+    """Parse an EVM uint surfaced as hex or decimal text."""
+
+    if isinstance(value, int):
+        if value < 0:
+            raise ValueError("uint value must be non-negative.")
+        return value
+
+    raw = value.strip()
+    if not raw:
+        raise ValueError("uint value must be non-empty.")
+    base = 16 if raw.startswith(("0x", "0X")) else 10
+    parsed = int(raw, base)
+    if parsed < 0:
+        raise ValueError("uint value must be non-negative.")
+    return parsed
+
+
+def format_token_units(raw_amount: int, decimals: int) -> str:
+    """Format raw token units as an exact base-10 amount string."""
+
+    if raw_amount < 0:
+        raise ValueError("raw_amount must be non-negative.")
+    if decimals < 0:
+        raise ValueError("decimals must be non-negative.")
+    if decimals == 0:
+        return str(raw_amount)
+
+    whole, fraction = divmod(raw_amount, 10**decimals)
+    if fraction == 0:
+        return str(whole)
+    fraction_text = f"{fraction:0{decimals}d}".rstrip("0")
+    return f"{whole}.{fraction_text}"

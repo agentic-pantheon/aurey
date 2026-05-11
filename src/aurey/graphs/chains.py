@@ -33,3 +33,12 @@ def alchemy_rpc_url_for_chain(name: str, api_key: str) -> str | None:
 def chain_id_for(name: str) -> int | None:
     info = chain_info(name)
     return None if info is None else info.chain_id
+
+
+def chain_name_for_id(chain_id: int) -> str | None:
+    """Return canonical chain slug (e.g. ``base``) for a numeric chain id, if known."""
+
+    for name, info in CHAIN_INDEX.items():
+        if info.chain_id == chain_id:
+            return name
+    return None

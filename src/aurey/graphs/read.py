@@ -9,28 +9,71 @@ from pydantic import BaseModel, Field, ValidationError
 
 from aurey.custody.errors import SecretNotFoundError, SecretStoreUnavailableError
 from aurey.graphs.chains import alchemy_rpc_url_for_chain, chain_id_for, chain_info
-from aurey.graphs.evm_codec import normalize_evm_address
+from aurey.graphs.evm_codec import (
+    ERC20_DECIMALS_CALLDATA,
+    decode_abi_uint256_word,
+    format_token_units,
+    normalize_evm_address,
+    parse_evm_uint,
+)
 from aurey.graphs.results import (
+    Erc20DecimalsResult,
     Erc20ReadPlaceholder,
     GraphErrorBody,
     KnownAddressResult,
     NativeBalanceResult,
 )
+from aurey.known_addresses.book import lookup_known_token
 from aurey.runtime import AureyRuntime
-
-KNOWN_TICKER_ADDRESSES: dict[tuple[str, str], str] = {
-    ("ethereum", "usdc"): "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-    ("base", "usdc"): "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-    ("ethereum", "weth"): "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-}
 
 
 class ReadGraphInput(BaseModel):
-    operation: Literal["native_balance", "known_address", "erc20_balance"]
+    operation: Literal["native_balance", "known_address", "erc20_balance", "erc20_decimals"]
     chain: str = Field(min_length=1)
     wallet_address: str | None = None
     token_address: str | None = None
     known_ticker: str | None = None
+
+
+def _alchemy_rpc_or_error(
+    runtime: AureyRuntime,
+    chain: str,
+) -> tuple[Any | None, dict[str, Any] | None]:
+    """Open JSON-RPC for ``chain`` via Alchemy URL, or return ``GraphErrorBody`` dict."""
+
+    alchemy_path = runtime.settings.alchemy_api_secret_path
+    if not alchemy_path:
+        return None, GraphErrorBody(
+            code="secret_not_configured",
+            message="Alchemy API secret path is not configured.",
+            details={"chain": chain},
+        ).model_dump()
+
+    try:
+        alchemy_key = runtime.secret_store.get_secret(alchemy_path).reveal()
+    except SecretNotFoundError:
+        return None, GraphErrorBody(
+            code="secret_not_found",
+            message="Alchemy API secret could not be resolved.",
+            details={"secret_kind": "alchemy_api"},
+        ).model_dump()
+    except SecretStoreUnavailableError:
+        return None, GraphErrorBody(
+            code="secret_unavailable",
+            message="Secret store unavailable while resolving Alchemy API key.",
+            details={"secret_kind": "alchemy_api"},
+        ).model_dump()
+
+    rpc_url = alchemy_rpc_url_for_chain(chain, alchemy_key)
+    if rpc_url is None:
+        return None, GraphErrorBody(
+            code="unsupported_chain",
+            message="No Alchemy RPC mapping for this chain.",
+            details={"chain": chain},
+        ).model_dump()
+
+    rpc = runtime.evm_rpc_factory(rpc_url)
+    return rpc, None
 
 
 class ReadGraphState(TypedDict, total=False):
@@ -103,7 +146,25 @@ def _validate_node(state: ReadGraphState) -> ReadGraphState:
             return {
                 "error": GraphErrorBody(
                     code="invalid_input",
-                    message="Invalid wallet address.",
+                    message="Invalid wallet or token address.",
+                    details={"reason": str(exc)},
+                ).model_dump()
+            }
+    if parsed.operation == "erc20_decimals":
+        if not parsed.token_address:
+            return {
+                "error": GraphErrorBody(
+                    code="invalid_input",
+                    message="token_address is required for erc20_decimals.",
+                ).model_dump()
+            }
+        try:
+            normalize_evm_address(parsed.token_address)
+        except ValueError as exc:
+            return {
+                "error": GraphErrorBody(
+                    code="invalid_input",
+                    message="Invalid token address.",
                     details={"reason": str(exc)},
                 ).model_dump()
             }
@@ -120,9 +181,8 @@ def _execute_node(runtime: AureyRuntime, state: ReadGraphState) -> ReadGraphStat
 
     if parsed.operation == "known_address":
         ticker = parsed.known_ticker or ""
-        key = (chain, ticker.strip().lower())
-        addr = KNOWN_TICKER_ADDRESSES.get(key)
-        if addr is None:
+        hit = lookup_known_token(chain, ticker)
+        if hit is None:
             return {
                 "error": GraphErrorBody(
                     code="invalid_input",
@@ -132,7 +192,13 @@ def _execute_node(runtime: AureyRuntime, state: ReadGraphState) -> ReadGraphStat
             }
         cid = chain_id_for(chain)
         assert cid is not None
-        result = KnownAddressResult(chain=chain, ticker=ticker, resolved_address=addr)
+        result = KnownAddressResult(
+            chain=chain,
+            ticker=ticker.strip(),
+            symbol=hit.symbol,
+            name=hit.name,
+            resolved_address=hit.address,
+        )
         return {"result": result.model_dump()}
 
     if parsed.operation == "erc20_balance":
@@ -143,52 +209,63 @@ def _execute_node(runtime: AureyRuntime, state: ReadGraphState) -> ReadGraphStat
         )
         return {"result": placeholder.model_dump()}
 
-    alchemy_path = runtime.settings.alchemy_api_secret_path
-    if not alchemy_path:
-        return {
-            "error": GraphErrorBody(
-                code="secret_not_configured",
-                message="Alchemy API secret path is not configured.",
-                details={"chain": chain},
-            ).model_dump()
-        }
+    if parsed.operation == "erc20_decimals":
+        rpc, err_body = _alchemy_rpc_or_error(runtime, chain)
+        if err_body is not None:
+            return {"error": err_body}
+        token = normalize_evm_address(parsed.token_address or "")
+        try:
+            raw = rpc.call(
+                "eth_call",
+                [{"to": token, "data": ERC20_DECIMALS_CALLDATA}, "latest"],
+            )
+            if not isinstance(raw, str):
+                raise TypeError("unexpected eth_call result type")
+            value = decode_abi_uint256_word(raw)
+            if value > 255:
+                return {
+                    "error": GraphErrorBody(
+                        code="rpc_error",
+                        message="Token decimals() value is outside the 0-255 range.",
+                        details={"token_address": token},
+                    ).model_dump()
+                }
+        except ValueError:
+            return {
+                "error": GraphErrorBody(
+                    code="rpc_error",
+                    message="Could not decode decimals() eth_call result.",
+                    details={"token_address": token},
+                ).model_dump()
+            }
+        except Exception:
+            return {
+                "error": GraphErrorBody(
+                    code="rpc_error",
+                    message="RPC eth_call for ERC-20 decimals() failed.",
+                ).model_dump()
+            }
+
+        cid = chain_id_for(chain)
+        assert cid is not None
+        out = Erc20DecimalsResult(
+            chain=chain,
+            chain_id=cid,
+            token_address=token,
+            decimals=value,
+        )
+        return {"result": out.model_dump()}
+
+    rpc, err_body = _alchemy_rpc_or_error(runtime, chain)
+    if err_body is not None:
+        return {"error": err_body}
 
     try:
-        alchemy_key = runtime.secret_store.get_secret(alchemy_path).reveal()
-    except SecretNotFoundError:
-        return {
-            "error": GraphErrorBody(
-                code="secret_not_found",
-                message="Alchemy API secret could not be resolved.",
-                details={"secret_kind": "alchemy_api"},
-            ).model_dump()
-        }
-    except SecretStoreUnavailableError:
-        return {
-            "error": GraphErrorBody(
-                code="secret_unavailable",
-                message="Secret store unavailable while resolving Alchemy API key.",
-                details={"secret_kind": "alchemy_api"},
-            ).model_dump()
-        }
-
-    rpc_url = alchemy_rpc_url_for_chain(chain, alchemy_key)
-    if rpc_url is None:
-        return {
-            "error": GraphErrorBody(
-                code="unsupported_chain",
-                message="No Alchemy RPC mapping for this chain.",
-                details={"chain": chain},
-            ).model_dump()
-        }
-
-    # The derived RPC URL contains the Alchemy key and is kept out of graph state and outputs.
-    try:
-        rpc = runtime.evm_rpc_factory(rpc_url)
         wallet = normalize_evm_address(parsed.wallet_address or "")
         balance_hex = rpc.call("eth_getBalance", [wallet, "latest"])
         if not isinstance(balance_hex, str):
             raise TypeError("unexpected balance type")
+        balance_wei = parse_evm_uint(balance_hex)
     except Exception:
         return {
             "error": GraphErrorBody(
@@ -204,6 +281,8 @@ def _execute_node(runtime: AureyRuntime, state: ReadGraphState) -> ReadGraphStat
         chain_id=cid,
         wallet_address=wallet,
         balance_wei_hex=balance_hex,
+        balance_wei=balance_wei,
+        balance_eth=format_token_units(balance_wei, 18),
     )
     return {"result": result.model_dump()}
 

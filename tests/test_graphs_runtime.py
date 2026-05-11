@@ -97,7 +97,45 @@ def test_read_native_balance_graph():
     )
     assert out.get("error") is None
     assert out["result"]["balance_wei_hex"] == "0x10"
+    assert out["result"]["balance_wei"] == 16
+    assert out["result"]["balance_eth"] == "0.000000000000000016"
     assert rpc_urls == ["https://eth-mainnet.g.alchemy.com/v2/INJECTED_ALCHEMY_KEY_AAA"]
+    _assert_no_banned_values(out)
+
+
+def test_read_erc20_decimals_graph():
+    alchemy_path = "vault/alchemy/x"
+    secrets = {alchemy_path: "INJECTED_ALCHEMY_KEY_AAA"}
+    settings = AureySettings(alchemy_api_secret_path=alchemy_path)
+
+    def eth_call(params: list) -> str:
+        assert params[0]["data"] == "0x313ce567"
+        assert params[1] == "latest"
+        return "0x0000000000000000000000000000000000000000000000000000000000000006"
+
+    runtime = AureyRuntime(
+        settings=settings,
+        secret_store=FakeSecretStore(secrets),
+        evm_rpc_factory=rpc_factory_from_mapping({"eth_call": eth_call}),
+        http=ScriptedHttpClient(),
+        tx_pipeline=DeterministicTxPipeline(),
+        lifi_base_url="https://li.quest",
+    )
+    graph = build_read_graph(runtime)
+    tok = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+    out = graph.invoke(
+        {
+            "input": {
+                "operation": "erc20_decimals",
+                "chain": "base",
+                "token_address": tok,
+            }
+        }
+    )
+    assert out.get("error") is None
+    assert out["result"]["decimals"] == 6
+    assert out["result"]["chain_id"] == 8453
+    assert out["result"]["token_address"] == tok.lower()
     _assert_no_banned_values(out)
 
 
@@ -114,7 +152,9 @@ def test_read_known_address_graph():
     out = graph.invoke(
         {"input": {"operation": "known_address", "chain": "ethereum", "known_ticker": "usdc"}}
     )
-    assert out["result"]["resolved_address"] == "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+    assert out["result"]["resolved_address"] == "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+    assert out["result"]["symbol"] == "USDC"
+    assert out["result"]["name"] == "USD Coin"
     _assert_no_banned_values(out)
 
 
@@ -230,6 +270,20 @@ def test_alchemy_portfolio_and_transfers_graphs():
                                     "symbol": "ETH",
                                     "name": "Ether",
                                 },
+                            },
+                            {
+                                "address": wallet,
+                                "network": "base-mainnet",
+                                "tokenAddress": "0x2222222222222222222222222222222222222222",
+                                "tokenBalance": (
+                                    "0x000000000000000000000000000000000000000000000000"
+                                    "0000000000000f569"
+                                ),
+                                "tokenMetadata": {
+                                    "decimals": "6",
+                                    "symbol": "USDC",
+                                    "name": "USD Coin",
+                                },
                             }
                         ]
                     }
@@ -257,6 +311,12 @@ def test_alchemy_portfolio_and_transfers_graphs():
         }
     )
     assert portfolio["result"]["tokens"][0]["tokenMetadata"]["symbol"] == "ETH"
+    assert portfolio["result"]["tokens"][0]["balance_raw"] == 1000000000000000000
+    assert portfolio["result"]["tokens"][0]["decimals"] == 18
+    assert portfolio["result"]["tokens"][0]["balance_decimal"] == "1"
+    assert portfolio["result"]["tokens"][1]["balance_raw"] == 62825
+    assert portfolio["result"]["tokens"][1]["decimals"] == 6
+    assert portfolio["result"]["tokens"][1]["balance_decimal"] == "0.062825"
     _assert_no_banned_values(portfolio)
 
     transfers = build_alchemy_graph(runtime).invoke(

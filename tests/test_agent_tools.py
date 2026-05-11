@@ -87,6 +87,7 @@ def test_tool_schemas_include_expected_names_and_descriptions():
     names = {t.name for t in tools}
     expected = {
         "evm_get_native_balance",
+        "evm_get_erc20_decimals",
         "resolve_known_address",
         "evm_get_erc20_balance",
         "alchemy_get_token_prices",
@@ -154,7 +155,9 @@ def test_resolve_known_address_tool_fake_runtime():
     tool = _tool_by_name(build_aurey_subgraph_tools(runtime), "resolve_known_address")
     out = tool.invoke({"chain": "ethereum", "known_ticker": "usdc"})
     assert out["ok"] is True
-    assert out["result"]["resolved_address"] == "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+    assert out["result"]["resolved_address"] == "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+    assert out["result"]["symbol"] == "USDC"
+    assert out["result"]["name"] == "USD Coin"
     _assert_no_banned_values(out)
 
 
@@ -183,6 +186,34 @@ def test_evm_get_erc20_balance_tool_stub():
     assert out["ok"] is True
     assert out["result"]["operation"] == "erc20_balance"
     assert out["result"]["token_address"] == "0x2222222222222222222222222222222222222222"
+    _assert_no_banned_values(out)
+
+
+def test_evm_get_erc20_decimals_tool():
+    alchemy_path = "vault/alchemy"
+    secrets = {alchemy_path: "INJECTED_ALCHEMY_KEY_AAA"}
+    usdc_base = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+
+    def eth_call(params: list) -> str:
+        assert params[0]["data"] == "0x313ce567"
+        return "0x0000000000000000000000000000000000000000000000000000000000000006"
+
+    runtime = AureyRuntime(
+        settings=AureySettings(
+            alchemy_api_secret_path=alchemy_path,
+            wallet_signing_key_secret_path="vault/signing",
+        ),
+        secret_store=FakeSecretStore(secrets),
+        evm_rpc_factory=rpc_factory_from_mapping({"eth_call": eth_call}),
+        http=ScriptedHttpClient(),
+        tx_pipeline=DeterministicTxPipeline(),
+        lifi_base_url="https://li.quest",
+    )
+    tool = _tool_by_name(build_aurey_subgraph_tools(runtime), "evm_get_erc20_decimals")
+    out = tool.invoke({"chain": "base", "token_address": usdc_base})
+    assert out["ok"] is True
+    assert out["result"]["decimals"] == 6
+    assert out["result"]["token_address"] == usdc_base.lower()
     _assert_no_banned_values(out)
 
 

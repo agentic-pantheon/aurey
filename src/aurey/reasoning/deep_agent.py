@@ -27,6 +27,9 @@ AUREY_DEEP_USER_PROMPT = (
     "- After a successful `tx_prepare_*` (`ok` true), calling `tx_execute` REQUIRES the argument "
     "`envelope` set to `result.envelope` from that prepare output, unchanged. Do not call "
     "`tx_execute` without `envelope`.\n"
+    "- For ERC-20 `tx_prepare_*`, parameter `amount_wei` means **raw token units** for that "
+    "token's decimals (USDC on Base = **6**: 0.01 USDC → `10000`, not `10**16`). "
+    "Call **evm_get_erc20_decimals** for the token contract when decimals are not certain.\n"
     "- Use **request_user_input** only when required fields are missing."
 )
 

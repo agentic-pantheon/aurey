@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from aurey.custody.secret_store import OneClawHttpClient, OneClawSecretStore
-from aurey.graphs import DeterministicTxPipeline
+from aurey.graphs.evm_tx_pipeline import Web3TxPipeline
 from aurey.reasoning import make_memory_checkpointer
 from aurey.runtime import AureyRuntime
 from aurey.service.adapters import UrllibHttpJsonClient, make_evm_rpc_factory
@@ -42,7 +42,7 @@ def bootstrap_aurey_service_state(settings: AureySettings | None = None) -> Aure
         secret_store=store,
         evm_rpc_factory=make_evm_rpc_factory(),
         http=UrllibHttpJsonClient(),
-        tx_pipeline=DeterministicTxPipeline(),
+        tx_pipeline=Web3TxPipeline(settings=s, secret_store=store),
     )
 
     default_model = (s.deep_agent_default_model or "").strip() or "openai:gpt-4o-mini"

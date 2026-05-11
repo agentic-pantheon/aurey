@@ -40,6 +40,8 @@ class NativeBalanceResult(BaseModel):
     chain_id: int
     wallet_address: str
     balance_wei_hex: str
+    balance_wei: int
+    balance_eth: str
 
 
 class KnownAddressResult(BaseModel):
@@ -47,7 +49,20 @@ class KnownAddressResult(BaseModel):
 
     chain: str
     ticker: str
+    symbol: str
+    name: str
     resolved_address: str
+
+
+class Erc20DecimalsResult(BaseModel):
+    """``decimals()`` read via ``eth_call`` (on-chain source of truth)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    chain: str
+    chain_id: int
+    token_address: str
+    decimals: int = Field(ge=0, le=255)
 
 
 class Erc20ReadPlaceholder(BaseModel):

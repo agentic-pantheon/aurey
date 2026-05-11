@@ -13,9 +13,12 @@ class ScriptedEvmJsonRpc(EvmJsonRpcPort):
         self._by_method = dict(by_method)
 
     def call(self, method: str, params: list[Any]) -> Any:
-        if method not in self._by_method:
+        handler = self._by_method.get(method)
+        if handler is None:
             raise RuntimeError(f"unexpected rpc method {method!r}")
-        return self._by_method[method]
+        if callable(handler):
+            return handler(params)
+        return handler
 
 
 def rpc_factory_from_mapping(

@@ -32,7 +32,7 @@ class HttpJsonPort(Protocol):
 
 @runtime_checkable
 class TxPipelinePort(Protocol):
-    """Deterministic simulation/policy/sign/broadcast stub."""
+    """Simulate, sign, and broadcast a prepared EVM transaction."""
 
     def run_prepared(
         self,

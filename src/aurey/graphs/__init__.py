@@ -1,6 +1,7 @@
 """Compiled LangGraph subgraphs and shared graph primitives."""
 
 from aurey.graphs.alchemy import AlchemyGraphInput, build_alchemy_graph
+from aurey.graphs.evm_tx_pipeline import Web3TxPipeline
 from aurey.graphs.read import ReadGraphInput, build_read_graph
 from aurey.graphs.results import GraphErrorBody, GraphRunResult, PreparedTxEnvelope
 from aurey.graphs.swap_prepare import SwapPrepareInput, build_swap_prepare_graph
@@ -25,6 +26,7 @@ __all__ = [
     "ReadGraphInput",
     "SwapPrepareInput",
     "TxExecuteInput",
+    "Web3TxPipeline",
     "TxPrepareErc20Approval",
     "TxPrepareErc20Transfer",
     "TxPrepareNative",

@@ -27,7 +27,10 @@ class TxPrepareErc20Transfer(BaseModel):
     from_address: str = Field(min_length=1)
     token_address: str = Field(min_length=1)
     to_address: str = Field(min_length=1)
-    amount_wei: int = Field(ge=0)
+    amount_wei: int = Field(
+        ge=0,
+        description="Raw token amount (token-specific decimals; USDC uses 6).",
+    )
 
 
 class TxPrepareErc20Approval(BaseModel):
@@ -36,7 +39,10 @@ class TxPrepareErc20Approval(BaseModel):
     from_address: str = Field(min_length=1)
     token_address: str = Field(min_length=1)
     spender_address: str = Field(min_length=1)
-    amount_wei: int = Field(ge=0)
+    amount_wei: int = Field(
+        ge=0,
+        description="Raw token amount (token-specific decimals; USDC uses 6).",
+    )
 
 
 TxPrepareInput = Annotated[

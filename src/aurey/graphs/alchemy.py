@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from aurey.custody.errors import SecretNotFoundError, SecretStoreUnavailableError
 from aurey.graphs.chains import chain_info
-from aurey.graphs.evm_codec import normalize_evm_address
+from aurey.graphs.evm_codec import format_token_units, normalize_evm_address, parse_evm_uint
 from aurey.graphs.results import (
     AlchemyPortfolioResult,
     AlchemyTokenPricesResult,
@@ -168,6 +168,47 @@ def _parse_prices_payload(payload: dict[str, Any], token_addrs: list[str]) -> di
     return out
 
 
+def _coerce_decimals(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = parse_evm_uint(value) if isinstance(value, int | str) else int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if 0 <= parsed <= 255 else None
+
+
+def _token_decimals(token: dict[str, Any]) -> int | None:
+    decimals = _coerce_decimals(token.get("decimals"))
+    if decimals is not None:
+        return decimals
+
+    metadata = token.get("tokenMetadata")
+    if isinstance(metadata, dict):
+        return _coerce_decimals(metadata.get("decimals"))
+    return None
+
+
+def _normalize_portfolio_token(token: dict[str, Any]) -> dict[str, Any]:
+    out = dict(token)
+    raw_balance = token.get("tokenBalance")
+    if not isinstance(raw_balance, int | str):
+        return out
+
+    try:
+        balance_raw = parse_evm_uint(raw_balance)
+    except ValueError:
+        return out
+
+    decimals = _token_decimals(token)
+    out["balance_raw"] = balance_raw
+    out["decimals"] = decimals
+    out["balance_decimal"] = (
+        format_token_units(balance_raw, decimals) if decimals is not None else None
+    )
+    return out
+
+
 def _parse_portfolio_tokens(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Portfolio API nests tokens under ``data.tokens``."""
 
@@ -175,7 +216,7 @@ def _parse_portfolio_tokens(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(data, dict):
         tokens = data.get("tokens")
         if isinstance(tokens, list):
-            return [dict(x) for x in tokens if isinstance(x, dict)]
+            return [_normalize_portfolio_token(x) for x in tokens if isinstance(x, dict)]
         return []
     return []
 

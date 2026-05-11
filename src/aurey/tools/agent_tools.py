@@ -80,6 +80,16 @@ class TxPrepareNativeArgs(BaseModel):
     value_wei: int = Field(ge=0)
 
 
+_ERC20_AMOUNT_FIELD = Field(
+    ge=0,
+    description=(
+        "Token amount in the contract's smallest units (not necessarily 1e18). "
+        "Lookup token decimals: USDC on Base/Ethereum uses **6** — e.g. 0.01 USDC = **10_000**, "
+        "1 USDC = **1_000_000**. WETH uses 18. Do not scale USDC by 10**18."
+    ),
+)
+
+
 class TxPrepareErc20TransferArgs(BaseModel):
     """Public args for ERC-20 transfer preparation; tool name supplies the kind."""
 
@@ -87,7 +97,7 @@ class TxPrepareErc20TransferArgs(BaseModel):
     from_address: str = Field(min_length=1)
     token_address: str = Field(min_length=1)
     to_address: str = Field(min_length=1)
-    amount_wei: int = Field(ge=0)
+    amount_wei: int = _ERC20_AMOUNT_FIELD
 
 
 class TxPrepareErc20ApprovalArgs(BaseModel):
@@ -97,7 +107,7 @@ class TxPrepareErc20ApprovalArgs(BaseModel):
     from_address: str = Field(min_length=1)
     token_address: str = Field(min_length=1)
     spender_address: str = Field(min_length=1)
-    amount_wei: int = Field(ge=0)
+    amount_wei: int = _ERC20_AMOUNT_FIELD
 
 
 class EvmGetNativeBalanceArgs(BaseModel):
@@ -119,6 +129,13 @@ class EvmGetErc20BalanceArgs(BaseModel):
 
     chain: str = Field(min_length=1)
     wallet_address: str = Field(min_length=1)
+    token_address: str = Field(min_length=1)
+
+
+class EvmGetErc20DecimalsArgs(BaseModel):
+    """Read token ``decimals()`` via deterministic ``eth_call``."""
+
+    chain: str = Field(min_length=1)
     token_address: str = Field(min_length=1)
 
 
@@ -144,7 +161,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
 
     @tool(args_schema=ResolveKnownAddressArgs)
     def resolve_known_address(chain: str, known_ticker: str) -> dict[str, Any]:
-        """Map a known ticker to an on-chain contract address (no RPC round-trip)."""
+        """Resolve ticker to address + name using bundled ``known_addresses.json``."""
         payload = ResolveKnownAddressArgs(chain=chain, known_ticker=known_ticker)
         graph_in = ReadGraphInput(
             operation="known_address",
@@ -173,8 +190,20 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         )
         return _graph_payload(read_g.invoke({"input": graph_in.model_dump()}))
 
+    @tool(args_schema=EvmGetErc20DecimalsArgs)
+    def evm_get_erc20_decimals(chain: str, token_address: str) -> dict[str, Any]:
+        """Return ERC-20 decimals from the token contract's decimals() view (eth_call)."""
+        payload = EvmGetErc20DecimalsArgs(chain=chain, token_address=token_address)
+        graph_in = ReadGraphInput(
+            operation="erc20_decimals",
+            chain=payload.chain,
+            token_address=payload.token_address,
+        )
+        return _graph_payload(read_g.invoke({"input": graph_in.model_dump()}))
+
     tools: list[BaseTool] = [
         evm_get_native_balance,
+        evm_get_erc20_decimals,
         resolve_known_address,
         evm_get_erc20_balance,
     ]
@@ -292,8 +321,10 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
     ) -> dict[str, Any]:
         """Prepare ERC-20 transfer envelope.
 
-        On success (`ok` true), call `tx_execute(envelope=result['envelope'])` with the returned
-        envelope object unchanged. Never call `tx_execute` without `envelope`.
+        `amount_wei` is misleadingly named: use the token's **native decimals** (raw integer),
+        not ETH wei. USDC = 6 decimals. On success (`ok` true), call
+        `tx_execute(envelope=result['envelope'])` with the returned envelope unchanged.
+        Never call `tx_execute` without `envelope`.
         """
         payload = TxPrepareErc20Transfer(
             chain=chain,
@@ -316,8 +347,8 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
     ) -> dict[str, Any]:
         """Prepare ERC-20 approval envelope.
 
-        On success (`ok` true), broadcast with `tx_execute(envelope=result['envelope'])` using that
-        dict verbatim.
+        `amount_wei` must be raw token units per token decimals (USDC: 6). On success (`ok` true),
+        broadcast with `tx_execute(envelope=result['envelope'])` using that dict verbatim.
         """
         payload = TxPrepareErc20Approval(
             chain=chain,
