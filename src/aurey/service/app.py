@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from langchain_core.messages import BaseMessage, HumanMessage
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.requests import Request
 
-from aurey.reasoning import thread_config
 from aurey.service.bootstrap import AureyServiceBootstrapError, bootstrap_aurey_service_state
 from aurey.service.dependencies import get_aurey_service_state
+from aurey.service.invoke import AgentInvokeError, AgentInvokeResult, invoke_deep_agent_turn
 from aurey.service.state import AureyServiceState
 from aurey.settings import AureySettings
 
@@ -33,46 +32,8 @@ class InvokeBody(BaseModel):
     )
 
 
-class InvokeError(BaseModel):
-    code: str
-    message: str
-
-
-class InvokeResponse(BaseModel):
-    ok: bool
-    session_id: str | None = None
-    messages: list[dict[str, Any]] | None = None
-    error: InvokeError | None = None
-
-
-def _summarize_agent_messages(messages: list[Any]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for m in messages:
-        if isinstance(m, BaseMessage):
-            content = getattr(m, "content", None)
-            if isinstance(content, list):
-                body: Any = "<non-text>"
-            else:
-                body = content
-            out.append(
-                {
-                    "role": getattr(m, "type", m.__class__.__name__),
-                    "type": m.__class__.__name__,
-                    "content": body,
-                }
-            )
-    return out
-
-
-def _misconfigured_response(session_id: str) -> InvokeResponse:
-    return InvokeResponse(
-        ok=False,
-        session_id=session_id,
-        error=InvokeError(
-            code="service_misconfigured",
-            message="The service is missing required configuration or bootstrap credentials.",
-        ),
-    )
+InvokeError = AgentInvokeError
+InvokeResponse = AgentInvokeResult
 
 
 def create_fastapi_application(
@@ -111,53 +72,12 @@ def create_fastapi_application(
     @app.post("/v1/invoke", response_model=InvokeResponse)
     def invoke(request: Request, turn: InvokeBody) -> InvokeResponse:
         svc = get_aurey_service_state(request)
-        if svc is None:
-            return _misconfigured_response(turn.session_id)
-
-        extra: dict[str, Any] = {}
-        if turn.context is not None:
-            extra["aurey_context"] = turn.context
-        config = thread_config(turn.session_id, **extra)
-
-        try:
-            graph = svc.get_or_create_graph(turn.agent_model_spec)
-        except RuntimeError as exc:
-            code = "deep_agent_unavailable"
-            msg_lower = str(exc).lower()
-            if "deepagents" in msg_lower:
-                code = "deep_agent_dependency"
-            return InvokeResponse(
-                ok=False,
-                session_id=turn.session_id,
-                error=InvokeError(
-                    code=code,
-                    message="The deep agent runtime is not available or misconfigured.",
-                ),
-            )
-
-        try:
-            result = graph.invoke(
-                {"messages": [HumanMessage(content=turn.message)]},
-                config=config,
-            )
-        except Exception:
-            return InvokeResponse(
-                ok=False,
-                session_id=turn.session_id,
-                error=InvokeError(
-                    code="agent_invoke_failed",
-                    message="The agent failed to complete this turn.",
-                ),
-            )
-
-        raw_messages = result.get("messages") if isinstance(result, dict) else None
-        if not isinstance(raw_messages, list):
-            raw_messages = []
-
-        return InvokeResponse(
-            ok=True,
+        return invoke_deep_agent_turn(
+            svc,
+            message=turn.message,
             session_id=turn.session_id,
-            messages=_summarize_agent_messages(raw_messages),
+            context=turn.context,
+            model=turn.agent_model_spec,
         )
 
     return app

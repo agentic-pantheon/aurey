@@ -62,6 +62,10 @@ class AureySettings(BaseSettings):
         default=None,
         description="1Claw vault path for signing material.",
     )
+    telegram_bot_token_secret_path: str | None = Field(
+        default=None,
+        description="1Claw vault path for the Telegram bot token.",
+    )
     deep_agent_default_model: str = Field(
         default="openai:gpt-4o-mini",
         description="Default Deep Agents model spec when the HTTP API omits ``model``.",

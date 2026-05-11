@@ -20,6 +20,9 @@ api = [
     "fastapi",
     "uvicorn[standard]",
 ]
+telegram = [
+    "python-telegram-bot>=21",
+]
 dev = [
     "fastapi>=0.115",
     "pytest>=8",
