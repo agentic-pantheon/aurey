@@ -7,9 +7,12 @@ Note: Configuration lives in this package intentionally; do not add a sibling
 from __future__ import annotations
 
 import os
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+EvmSigningMode = Literal["vault_key", "oneclaw_intents"]
 
 
 class AureySettings(BaseSettings):
@@ -60,9 +63,19 @@ class AureySettings(BaseSettings):
             "Set empty to omit."
         ),
     )
+    evm_signing_mode: EvmSigningMode = Field(
+        default="vault_key",
+        description=(
+            "How EVM transactions are signed: ``vault_key`` (vault-backed key material) or "
+            "``oneclaw_intents`` (unified 1Claw signing; reserved for future use)."
+        ),
+    )
     wallet_signing_key_secret_path: str | None = Field(
         default=None,
-        description="1Claw vault path for signing material.",
+        description=(
+            "1Claw vault path for signing material. Required when ``evm_signing_mode`` is "
+            "``vault_key``; not used for ``oneclaw_intents``."
+        ),
     )
     telegram_bot_token_secret_path: str | None = Field(
         default=None,
@@ -72,6 +85,12 @@ class AureySettings(BaseSettings):
         default="openai:gpt-4o-mini",
         description="Default Deep Agents model spec when the HTTP API omits ``model``.",
     )
+
+    @property
+    def evm_signing_requires_wallet_signing_key_secret_path(self) -> bool:
+        """True when vault-backed signing key material must be configured."""
+
+        return self.evm_signing_mode == "vault_key"
 
     def resolve_oneclaw_bootstrap_api_key(self) -> str:
         """Return bootstrap API key from the env named by ``oneclaw_api_key_secret_source``."""
