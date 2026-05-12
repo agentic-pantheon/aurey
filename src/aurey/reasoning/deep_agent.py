@@ -12,6 +12,7 @@ from langgraph.graph.state import CompiledStateGraph
 from aurey.graphs.chains import CHAIN_INDEX
 from aurey.graphs.evm_codec import normalize_evm_address
 from aurey.reasoning.harness import ensure_aurey_wallet_harness, resolve_harness_model_spec
+from aurey.reasoning.langsmith_trace import apply_langsmith_tool_output_patch
 from aurey.runtime import AureyRuntime
 from aurey.settings import AureySettings
 from aurey.tools.agent_tools import build_aurey_subgraph_tools
@@ -159,6 +160,7 @@ def create_aurey_deep_agent(
 ) -> CompiledStateGraph[Any, Any, Any]:
     """Compile Deep Agents with subgraph-backed tools and optional MemorySaver checkpointer."""
 
+    apply_langsmith_tool_output_patch()
     create_deep_agent, FilesystemPermission = _import_deepagents_create_agent()
 
     harness_spec = resolve_harness_model_spec(model)
