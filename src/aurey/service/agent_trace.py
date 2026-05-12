@@ -19,6 +19,19 @@ def _clip(text: str, max_chars: int = 4000) -> str:
     return f"{collapsed[:max_chars]} ... [truncated, {len(collapsed)} chars total]"
 
 
+def format_exception_chain(exc: BaseException, *, max_chars: int = 900) -> str:
+    """Format exception plus causes/context (LLM errors are often wrapped)."""
+
+    parts: list[str] = []
+    seen: set[int] = set()
+    e: BaseException | None = exc
+    while e is not None and len(parts) < 8 and id(e) not in seen:
+        seen.add(id(e))
+        parts.append(f"{type(e).__module__}.{type(e).__name__}: {e}")
+        e = e.__cause__ or e.__context__
+    return _clip(" | caused_by: ".join(parts), max_chars)
+
+
 def _kv_line(**parts: str | int | UUID | None) -> str:
     rendered: list[str] = []
     for k, v in parts.items():
@@ -71,7 +84,7 @@ class AureyAgentTraceHandler(BaseCallbackHandler):
     def on_chain_start(
         self,
         serialized: dict[str, Any] | None,
-        _inputs: dict[str, Any],
+        inputs: dict[str, Any],
         *,
         run_id: UUID,
         **kwargs: Any,
@@ -82,6 +95,14 @@ class AureyAgentTraceHandler(BaseCallbackHandler):
         name = None
         if isinstance(serialized, dict):
             name = serialized.get("name") or serialized.get("id")
+        node = meta.get("langgraph_node")
+        in_keys = None
+        n_messages = None
+        if node == "model" and isinstance(inputs, dict) and inputs:
+            in_keys = ",".join(sorted(inputs.keys()))[:120]
+            msgs = inputs.get("messages")
+            if isinstance(msgs, list):
+                n_messages = len(msgs)
         line = _kv_line(
             session=self._session_id,
             event="chain_start",
@@ -89,6 +110,8 @@ class AureyAgentTraceHandler(BaseCallbackHandler):
             graph_node=meta.get("langgraph_node"),
             graph_step=meta.get("langgraph_step"),
             chain_name=name,
+            input_keys=in_keys,
+            n_messages=n_messages,
         )
         _log.info("agent_trace  %s", line)
 
@@ -145,7 +168,8 @@ class AureyAgentTraceHandler(BaseCallbackHandler):
             run_id=str(run_id)[:8],
             graph_node=meta.get("langgraph_node"),
             graph_step=meta.get("langgraph_step"),
-            error=_clip(str(error), 500),
+            exc_type=type(error).__name__,
+            detail=format_exception_chain(error),
         )
         _log.warning("agent_trace  %s", line)
 
@@ -163,7 +187,8 @@ class AureyAgentTraceHandler(BaseCallbackHandler):
             run_id=str(run_id)[:8],
             graph_node=meta.get("langgraph_node"),
             graph_step=meta.get("langgraph_step"),
-            error=_clip(str(error), 500),
+            exc_type=type(error).__name__,
+            detail=format_exception_chain(error),
         )
         _log.warning("agent_trace  %s", line)
 
@@ -175,29 +200,33 @@ class AureyAgentTraceHandler(BaseCallbackHandler):
         run_id: UUID,
         **kwargs: Any,
     ) -> Any:
-        if self._detail != "debug":
-            return
+        meta = self._meta(kwargs)
+        node = meta.get("langgraph_node")
         batches = len(messages) if isinstance(messages, list) else 0
         total_msgs = (
             sum(len(b) for b in messages)
             if isinstance(messages, list) and all(isinstance(b, list) for b in messages)
             else 0
         )
-        meta = self._meta(kwargs)
         model_name = None
         if isinstance(serialized, dict):
-            model_name = serialized.get("name")
+            model_name = serialized.get("name") or serialized.get("id")
         line = _kv_line(
             session=self._session_id,
             event="chat_model_start",
             run_id=str(run_id)[:8],
-            graph_node=meta.get("langgraph_node"),
+            graph_node=node,
             graph_step=meta.get("langgraph_step"),
             model=model_name,
             message_batches=batches,
             messages=total_msgs,
         )
-        _log.debug("agent_trace  %s", line)
+        # LLM request: always log at INFO when this callback runs on the graph ``model`` node so
+        # ``AUREY_AGENT_TRACE=info`` shows provider calls (not only generic ``chain_start``).
+        if node == "model":
+            _log.info("agent_trace  %s", line)
+        elif self._detail == "debug":
+            _log.debug("agent_trace  %s", line)
 
     def on_llm_new_token(
         self,
@@ -255,4 +284,5 @@ __all__ = [
     "AureyAgentTraceHandler",
     "agent_trace_detail",
     "build_agent_trace_handler",
+    "format_exception_chain",
 ]

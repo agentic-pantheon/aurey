@@ -31,6 +31,13 @@ class TxPrepareLiFiInput(BaseModel):
             "Preferred: exact `prepared` from `swap_prepare` (`route_id` + `transaction_request`)."
         ),
     )
+    prepared_id: str | None = Field(
+        default=None,
+        description=(
+            "Server-side prepared id returned by swap_prepare; preferred because it avoids "
+            "sending large LiFi calldata through the model."
+        ),
+    )
     route_id: str | None = Field(
         default=None,
         description="Alternative when `prepared` is awkward for the caller: LiFi step id string.",
@@ -43,6 +50,8 @@ class TxPrepareLiFiInput(BaseModel):
 
     @model_validator(mode="after")
     def _ensure_prepared(self) -> TxPrepareLiFiInput:
+        if self.prepared_id is not None and str(self.prepared_id).strip():
+            return self
         if self.prepared is not None:
             return self
         if self.route_id is not None and self.transaction_request is not None:
@@ -55,7 +64,8 @@ class TxPrepareLiFiInput(BaseModel):
                 }
             )
         raise ValueError(
-            "Provide `prepared` from swap_prepare, or both `route_id` and `transaction_request`."
+            "Provide `prepared_id` from swap_prepare, `prepared`, or both `route_id` and "
+            "`transaction_request`."
         )
 
 
@@ -109,7 +119,8 @@ def _validate_node(
         }
 
     try:
-        LiFiPreparedTx.model_validate(parsed.prepared)
+        if not parsed.prepared_id:
+            LiFiPreparedTx.model_validate(parsed.prepared)
     except ValidationError as exc:
         return {
             "error": GraphErrorBody(

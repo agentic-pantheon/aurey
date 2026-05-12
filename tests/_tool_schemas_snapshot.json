@@ -320,10 +320,18 @@
     "description": "Simulate/policy/sign/broadcast for a typed prepare envelope.",
     "properties": {
       "envelope": {
-        "additionalProperties": true,
-        "description": "Required. The exact `envelope` object from a successful `tx_prepare_*` call: `prepare_output['result']['envelope']`. Pass the dict unchanged (do not omit this field).",
-        "title": "Envelope",
-        "type": "object"
+        "anyOf": [
+          {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "Required. The exact `envelope` object from a successful `tx_prepare_*` or `tx_prepare_lifi_swap` call: `prepare_output['result']['envelope']`. You cannot call this tool with only `idempotency_key`.",
+        "title": "Envelope"
       },
       "idempotency_key": {
         "anyOf": [
@@ -335,13 +343,23 @@
           }
         ],
         "default": null,
-        "description": "Optional idempotency key for the execute/broadcast pipeline.",
+        "description": "Optional idempotency key for broadcast (never pass without `envelope`).",
         "title": "Idempotency Key"
+      },
+      "prepared_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "Preferred for LiFi swaps: short server-side prepared transaction id returned by `swap_prepare` or `tx_prepare_lifi_swap`. Avoids sending large calldata through the model.",
+        "title": "Prepared Id"
       }
     },
-    "required": [
-      "envelope"
-    ],
     "title": "TxExecuteToolArgs",
     "type": "object"
   },
@@ -451,6 +469,19 @@
         "default": null,
         "description": "Preferred: exact `prepared` from `swap_prepare` (`route_id` + `transaction_request`).",
         "title": "Prepared"
+      },
+      "prepared_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "Server-side prepared id returned by swap_prepare; preferred because it avoids sending large LiFi calldata through the model.",
+        "title": "Prepared Id"
       },
       "route_id": {
         "anyOf": [

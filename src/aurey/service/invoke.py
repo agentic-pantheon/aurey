@@ -11,7 +11,7 @@ from openai import APIConnectionError, APITimeoutError
 from pydantic import BaseModel
 
 from aurey.reasoning import thread_config
-from aurey.service.agent_trace import build_agent_trace_handler
+from aurey.service.agent_trace import build_agent_trace_handler, format_exception_chain
 from aurey.service.message_content import (
     flatten_message_content,
     reply_preview_from_summary,
@@ -41,16 +41,44 @@ def _kv_line(**parts: str | int) -> str:
     return "  ".join(f"{k}={v}" for k, v in parts.items())
 
 
+def _is_transient_llm_error(exc: BaseException) -> bool:
+    """Treat OpenAI SDK and common httpx/httpcore network failures as retryable (incl. wrapped)."""
+
+    seen: set[int] = set()
+    e: BaseException | None = exc
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        if isinstance(e, (APIConnectionError, APITimeoutError)):
+            return True
+        mod = type(e).__module__
+        name = type(e).__name__
+        if mod == "httpx" and name in (
+            "ConnectError",
+            "ConnectTimeout",
+            "ReadTimeout",
+            "RemoteProtocolError",
+            "WriteTimeout",
+            "PoolTimeout",
+        ):
+            return True
+        if mod == "httpcore" and "Timeout" in name:
+            return True
+        e = e.__cause__ or e.__context__
+    return False
+
+
 def _invoke_graph_with_transient_retries(graph, *, message: str, config: dict[str, Any]) -> Any:
-    """Retry OpenAI connection/timeout blips that surface during ``graph.invoke``."""
+    """Retry LLM HTTP/network blips during ``graph.invoke`` (often wrapped by LangChain)."""
 
     payload = {"messages": [HumanMessage(content=message)]}
     last_exc: BaseException | None = None
     for attempt in range(_MODEL_TRANSIENT_ATTEMPTS):
         try:
             return graph.invoke(payload, config=config)
-        except (APIConnectionError, APITimeoutError) as exc:
+        except Exception as exc:
             last_exc = exc
+            if not _is_transient_llm_error(exc):
+                raise
             if attempt + 1 >= _MODEL_TRANSIENT_ATTEMPTS:
                 raise
             delay = _MODEL_TRANSIENT_BASE_DELAY_SEC * (2**attempt)
@@ -59,7 +87,7 @@ def _invoke_graph_with_transient_retries(graph, *, message: str, config: dict[st
                 attempt + 1,
                 _MODEL_TRANSIENT_ATTEMPTS,
                 delay,
-                exc,
+                format_exception_chain(exc, max_chars=600),
             )
             time.sleep(delay)
     raise AssertionError("unreachable") from last_exc
@@ -156,8 +184,13 @@ def invoke_deep_agent_turn(
         result = _invoke_graph_with_transient_retries(
             graph, message=message, config=config
         )
-    except Exception:
-        _log.debug("agent invoke failed", exc_info=True)
+    except Exception as exc:
+        _log.warning(
+            "agent invoke failed after retries  session=%s  detail=%s",
+            session_id,
+            format_exception_chain(exc, max_chars=1200),
+            exc_info=True,
+        )
         err_msg = "The agent failed to complete this turn."
         _log.info(
             "error  %s",

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+
+from aurey.graphs.evm_codec import normalize_contract_calldata
 
 GraphErrorCode = Literal[
     "needs_approval",
@@ -157,6 +159,14 @@ class PreparedTxEnvelope(BaseModel):
     gas_limit_hex: str | None = None
     nonce: int | None = None
     signing_key_secret_path: str = Field(min_length=1)
+
+    @field_validator("data")
+    @classmethod
+    def _normalize_calldata(cls, v: str) -> str:
+        try:
+            return normalize_contract_calldata(v)
+        except ValueError as exc:
+            raise ValueError(f"invalid calldata ({exc})") from exc
 
 
 class TxReceiptSummary(BaseModel):

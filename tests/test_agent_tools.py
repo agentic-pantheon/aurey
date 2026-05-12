@@ -391,6 +391,89 @@ def test_tx_execute_tool_coerces_mistaken_lifi_prepared_blob():
     _assert_no_banned_values(out)
 
 
+def test_lifi_swap_prepare_returns_compact_prepared_id_and_execute_uses_it():
+    signing_path = "vault/signing/local"
+    wallet = "0xc1923710468607b8b7db38a6afbb9b432744390c"
+    secrets = {signing_path: "0x" + "ff" * 32}
+    large_calldata = "0x5fd9ae2e" + ("00" * 2500)
+
+    def match_lifi_quote(**kw: object) -> bool:
+        return kw.get("method") == "GET" and "/v1/quote?" in str(kw.get("url") or "")
+
+    runtime = AureyRuntime(
+        settings=AureySettings(wallet_signing_key_secret_path=signing_path),
+        secret_store=FakeSecretStore(secrets),
+        evm_rpc_factory=rpc_factory_from_mapping({}),
+        http=ScriptedHttpClient(
+            [
+                (
+                    match_lifi_quote,
+                    {
+                        "id": "route-1:0",
+                        "transactionRequest": {
+                            "value": "0x0",
+                            "to": "0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae",
+                            "data": large_calldata,
+                            "chainId": 8453,
+                            "gasLimit": "0x5208",
+                            "from": wallet,
+                        },
+                    },
+                )
+            ]
+        ),
+        tx_pipeline=DeterministicTxPipeline(),
+        lifi_base_url="https://li.quest",
+    )
+    tools = build_aurey_subgraph_tools(runtime)
+    swap_prepare = _tool_by_name(tools, "swap_prepare")
+    prepared = swap_prepare.invoke(
+        {
+            "from_chain": "base",
+            "to_chain": "base",
+            "from_asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            "to_asset": "0x4200000000000000000000000000000000000006",
+            "from_amount_wei": "1000000",
+            "from_address": wallet,
+            "to_address": wallet,
+            "slippage": 0.005,
+            "order": "CHEAPEST",
+        }
+    )
+    assert prepared["ok"] is True
+    prepared_id = prepared["result"]["prepared_id"]
+    assert prepared_id.startswith("ptx_")
+    assert prepared["result"]["prepared"]["data_selector"] == "0x5fd9ae2e"
+    assert "transaction_request" not in prepared["result"]["prepared"]
+    assert large_calldata not in json.dumps(prepared, sort_keys=True)
+
+    tx_execute = _tool_by_name(tools, "tx_execute")
+    out = tx_execute.invoke({"prepared_id": prepared_id})
+    assert out["ok"] is True
+    assert out["result"]["tx_hash"].startswith("0x")
+
+    legacy_shape = tx_execute.invoke({"envelope": prepared["result"]["prepared"]})
+    assert legacy_shape["ok"] is True
+    assert legacy_shape["result"]["tx_hash"].startswith("0x")
+
+
+def test_tx_execute_tool_rejects_idempotency_key_without_envelope():
+    signing_path = "vault/signing/local"
+    secrets = {signing_path: "0x" + "ff" * 32}
+    settings = AureySettings(wallet_signing_key_secret_path=signing_path)
+    runtime = AureyRuntime(
+        settings=settings,
+        secret_store=FakeSecretStore(secrets),
+        evm_rpc_factory=rpc_factory_from_mapping({}),
+        http=ScriptedHttpClient(),
+        tx_pipeline=DeterministicTxPipeline(),
+        lifi_base_url="https://li.quest",
+    )
+    tool = _tool_by_name(build_aurey_subgraph_tools(runtime), "tx_execute")
+    with pytest.raises(Exception, match="envelope"):
+        tool.invoke({"idempotency_key": "usdc-to-weth-base-1"})
+
+
 def test_create_aurey_deep_agent_compiles():
     signing_path = "vault/signing/local"
     secrets = {signing_path: "0x" + "ff" * 32}

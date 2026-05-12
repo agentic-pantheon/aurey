@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from aurey.graphs.evm_codec import normalize_evm_address, parse_evm_uint
+from aurey.graphs.evm_codec import (
+    normalize_contract_calldata,
+    normalize_evm_address,
+    parse_evm_uint,
+)
 from aurey.graphs.results import PreparedTxEnvelope
 
 
@@ -45,14 +49,13 @@ def lifi_transaction_request_to_envelope(
         if cid != chain_id:
             raise ValueError("transaction_request.chainId does not match chain.")
 
-    data = tr.get("data")
-    if data is None or data == "":
-        data = "0x"
-    elif isinstance(data, str):
-        d = data.strip()
-        data = d if d.startswith("0x") else ("0x" + d)
-    else:
+    data_raw = tr.get("data")
+    if data_raw is not None and not isinstance(data_raw, str):
         raise ValueError("transaction_request.data must be a hex string.")
+    try:
+        data = normalize_contract_calldata(data_raw if isinstance(data_raw, str) else None)
+    except ValueError as exc:
+        raise ValueError(f"transaction_request.data: {exc}") from exc
 
     value_raw = tr.get("value")
     if value_raw is None:

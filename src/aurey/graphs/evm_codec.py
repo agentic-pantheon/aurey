@@ -56,6 +56,28 @@ def decode_abi_uint256_word(result_hex: str) -> int:
     return int(raw, 16)
 
 
+def normalize_contract_calldata(data: str | None) -> str:
+    """Return ``0x``-prefixed lowercase hex for a tx ``data`` field (``eth_call`` / broadcast).
+
+    Rejects non-hex characters and odd-length payloads (incomplete bytes).
+    """
+
+    s = (data or "").strip()
+    if not s or s == "0x":
+        return "0x"
+    if not s.startswith("0x"):
+        s = "0x" + s
+    body = s[2:]
+    if not body:
+        return "0x"
+    for c in body:
+        if c not in "0123456789abcdefABCDEF":
+            raise ValueError(f"calldata contains non-hex character {c!r}")
+    if len(body) % 2 != 0:
+        raise ValueError("calldata hex has odd length (incomplete bytes)")
+    return "0x" + body.lower()
+
+
 def parse_evm_uint(value: str | int) -> int:
     """Parse an EVM uint surfaced as hex or decimal text."""
 

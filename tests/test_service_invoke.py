@@ -31,6 +31,30 @@ def test_invoke_retries_on_transient_openai_connection_error() -> None:
     assert graph.invoke.call_count == 3
 
 
+def test_invoke_retries_when_openai_error_wrapped() -> None:
+    """LangChain often wraps provider errors; retries should still run."""
+
+    inner = APIConnectionError(request=MagicMock())
+    calls: list[int] = []
+
+    def invoke_side_effect(_payload, config=None):
+        _ = config
+        calls.append(1)
+        if len(calls) < 2:
+            raise RuntimeError("model step failed") from inner
+        return {"messages": []}
+
+    svc = MagicMock(spec=AureyServiceState)
+    svc.default_model = "openai:gpt-4o-mini"
+    graph = MagicMock()
+    graph.invoke.side_effect = invoke_side_effect
+    svc.get_or_create_graph.return_value = graph
+
+    out = invoke_deep_agent_turn(svc, message="hi", session_id="t:wrap")
+    assert out.ok is True
+    assert graph.invoke.call_count == 2
+
+
 def test_invoke_does_not_retry_on_non_openai_errors() -> None:
     svc = MagicMock(spec=AureyServiceState)
     svc.default_model = "openai:gpt-4o-mini"

@@ -14,6 +14,7 @@ from web3.exceptions import TimeExhausted
 from aurey.custody.errors import SecretNotFoundError, SecretStoreUnavailableError
 from aurey.custody.secret_store import SecretStore
 from aurey.graphs.chains import alchemy_rpc_url_for_chain, chain_name_for_id
+from aurey.graphs.evm_codec import normalize_contract_calldata
 from aurey.graphs.ports import TxPipelinePort
 from aurey.graphs.results import PreparedTxEnvelope, TxExecuteResult, TxReceiptSummary
 from aurey.graphs.swap_diag import SWAP_LOG, addr_short
@@ -44,6 +45,12 @@ def _simulation_failed(
                 " Hint: For ERC-20 sells, ensure allowance: call swap_prepare and use "
                 "`allowance` → tx_prepare_erc20_approval → tx_execute, then run the swap tx "
                 "(refresh quote if the first swap simulation fails after approval)."
+            )
+        elif "hex" in low or "hex string" in low:
+            msg += (
+                " Hint: Calldata/value shape may be invalid. Re-run `swap_prepare`, then "
+                "`tx_prepare_lifi_swap` with fresh `prepared`; do not pass truncated JSON or "
+                "a lone `idempotency_key` to `tx_execute`."
             )
     return RuntimeError(msg)
 
@@ -144,11 +151,16 @@ class Web3TxPipeline(TxPipelinePort):
         to_cs = Web3.to_checksum_address(envelope.to)
         value_wei = int(envelope.value_hex, 0)
 
+        try:
+            data = normalize_contract_calldata(envelope.data)
+        except ValueError as exc:
+            raise RuntimeError(f"policy_rejected: invalid calldata ({exc}).") from exc
+
         nonce = envelope.nonce
+        if nonce is not None:
+            nonce = int(nonce)
         if nonce is None:
             nonce = int(w3.eth.get_transaction_count(from_cs, "pending"))
-
-        data = envelope.data if envelope.data else "0x"
 
         base: dict[str, Any] = {
             "chainId": envelope.chain_id,

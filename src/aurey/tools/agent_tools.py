@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 from langchain_core.tools import BaseTool, tool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from aurey.graphs import (
     SwapPrepareInput,
@@ -90,6 +90,73 @@ def _try_coerce_lifi_prepared_to_execute_envelope(
     return fixed if isinstance(fixed, dict) else None
 
 
+def _data_selector(data_text: str) -> str | None:
+    if data_text.startswith("0x") and len(data_text) >= 10:
+        return data_text[:10]
+    return None
+
+
+def _data_bytes(data_text: str) -> int | None:
+    if not data_text.startswith("0x"):
+        return None
+    return max((len(data_text) - 2) // 2, 0)
+
+
+def _tx_request_summary(
+    tx_req: dict[str, Any],
+    *,
+    route_id: str,
+    prepared_id: str,
+) -> dict[str, Any]:
+    data = tx_req.get("data")
+    data_text = data.strip() if isinstance(data, str) else ""
+    chain_id = _parse_chain_id_field(tx_req.get("chainId"))
+    return {
+        "route_id": route_id,
+        "prepared_id": prepared_id,
+        "chain_id": chain_id,
+        "from": tx_req.get("from"),
+        "to": tx_req.get("to"),
+        "value": tx_req.get("value"),
+        "gas_limit": tx_req.get("gasLimit") or tx_req.get("gas"),
+        "data_selector": _data_selector(data_text),
+        "data_bytes": _data_bytes(data_text),
+    }
+
+
+def _envelope_summary(
+    envelope: dict[str, Any],
+    *,
+    prepared_id: str | None = None,
+) -> dict[str, Any]:
+    data = envelope.get("data")
+    data_text = data.strip() if isinstance(data, str) else ""
+    out: dict[str, Any] = {
+        "kind": envelope.get("kind"),
+        "chain_id": envelope.get("chain_id"),
+        "from_address": envelope.get("from_address"),
+        "to": envelope.get("to"),
+        "value_hex": envelope.get("value_hex"),
+        "gas_limit_hex": envelope.get("gas_limit_hex"),
+        "data_selector": _data_selector(data_text),
+        "data_bytes": _data_bytes(data_text),
+    }
+    if prepared_id is not None:
+        out["prepared_id"] = prepared_id
+    return out
+
+
+def _invalid_prepared_id(prepared_id: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": {
+            "code": "invalid_input",
+            "message": "Prepared transaction id was not found or has expired.",
+            "details": {"prepared_id": prepared_id},
+        },
+    }
+
+
 class AlchemyTokenPricesArgs(BaseModel):
     """Token prices quoted by contract address."""
 
@@ -115,18 +182,39 @@ class AlchemyTransferHistoryArgs(BaseModel):
 class TxExecuteToolArgs(BaseModel):
     """Simulate/policy/sign/broadcast for a typed prepare envelope."""
 
-    envelope: dict[str, Any] = Field(
-        ...,
+    model_config = ConfigDict(extra="ignore")
+
+    envelope: dict[str, Any] | None = Field(
+        default=None,
         description=(
-            "Required. The exact `envelope` object from a successful `tx_prepare_*` call: "
-            "`prepare_output['result']['envelope']`. "
-            "Pass the dict unchanged (do not omit this field)."
+            "Required. The exact `envelope` object from a successful `tx_prepare_*` or "
+            "`tx_prepare_lifi_swap` call: `prepare_output['result']['envelope']`. "
+            "You cannot call this tool with only `idempotency_key`."
+        ),
+    )
+    prepared_id: str | None = Field(
+        default=None,
+        description=(
+            "Preferred for LiFi swaps: short server-side prepared transaction id returned by "
+            "`swap_prepare` or `tx_prepare_lifi_swap`. Avoids sending large calldata through the "
+            "model."
         ),
     )
     idempotency_key: str | None = Field(
         default=None,
-        description="Optional idempotency key for the execute/broadcast pipeline.",
+        description="Optional idempotency key for broadcast (never pass without `envelope`).",
     )
+
+    @model_validator(mode="after")
+    def _tx_reference_required(self) -> Self:
+        if not self.envelope and not self.prepared_id:
+            raise ValueError(
+                "tx_execute requires `prepared_id` (preferred for LiFi swaps) or `envelope`: use "
+                "`prepared_id` from `swap_prepare`/`tx_prepare_lifi_swap`, or the exact dict from "
+                "a successful prepare tool at `result['envelope']`. `idempotency_key` alone is "
+                "invalid."
+            )
+        return self
 
 
 class TxPrepareNativeArgs(BaseModel):
@@ -372,9 +460,8 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         a decimal fraction (e.g. ``0.005`` = 0.5%%). Optional ``order`` is ``FASTEST`` or
         ``CHEAPEST``. Prefer **checksum** ``0x`` token addresses when possible.
 
-        On success, pass **the same** ``chain`` and ``from_address`` plus
-        ``prepared=result['prepared']`` into ``tx_prepare_lifi_swap``, then call
-        ``tx_execute(envelope=...)`` with that tool's ``result['envelope']``.
+        On success, call ``tx_execute(prepared_id=result['prepared_id'])``. The full LiFi
+        transaction request is stored server-side so the model does not need to copy calldata.
 
         When ``result`` includes ``allowance``, the wallet must approve the spender for the
         sell token before the swap simulates (unless allowance was already sufficient—then
@@ -402,6 +489,43 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
             prep = out["result"].get("prepared")
             if isinstance(prep, dict):
                 rid = prep.get("route_id")
+                tx_req = prep.get("transaction_request") or prep.get("transactionRequest")
+                if isinstance(rid, str) and isinstance(tx_req, dict):
+                    lifi_prepared_id = runtime.prepared_txs.put(
+                        kind="lifi_prepared",
+                        payload=prep,
+                        summary=_tx_request_summary(tx_req, route_id=rid, prepared_id=""),
+                    )
+                    prepared_state = prepare_lifi_g.invoke(
+                        {
+                            "input": {
+                                "chain": from_chain,
+                                "from_address": from_address,
+                                "prepared": prep,
+                            }
+                        }
+                    )
+                    err = prepared_state.get("error")
+                    res = prepared_state.get("result")
+                    if err is not None or not isinstance(res, dict):
+                        out = {"ok": False, "error": err or {"code": "invalid_input"}}
+                    else:
+                        envelope = res.get("envelope")
+                        if isinstance(envelope, dict):
+                            prepared_id = runtime.prepared_txs.put(
+                                kind="execute_envelope",
+                                payload=envelope,
+                                summary=_envelope_summary(envelope),
+                            )
+                            compact = _tx_request_summary(
+                                tx_req,
+                                route_id=rid,
+                                prepared_id=prepared_id,
+                            )
+                            compact["execute_prepared_id"] = prepared_id
+                            compact["lifi_prepared_id"] = lifi_prepared_id
+                            out["result"]["prepared"] = compact
+                            out["result"]["prepared_id"] = prepared_id
         log_swap_tool(
             name="swap_prepare",
             wall_ms=(time.perf_counter() - t0) * 1000,
@@ -419,20 +543,32 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         chain: str,
         from_address: str,
         prepared: dict[str, Any] | None = None,
+        prepared_id: str | None = None,
         route_id: str | None = None,
         transaction_request: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Convert ``swap_prepare`` output into a ``tx_execute`` envelope.
 
-        Pass either (a) ``prepared`` verbatim from ``swap_prepare`` ``result['prepared']``, or
-        (b) ``route_id`` plus ``transaction_request`` (the LiFi tx object) if nested ``prepared``
-        is hard to supply. On success, call ``tx_execute(envelope=result['envelope'])``.
+        Prefer ``prepared_id`` from ``swap_prepare``; it keeps large calldata out of the model
+        context. Legacy callers may still pass ``prepared`` verbatim or ``route_id`` plus
+        ``transaction_request``. On success, call ``tx_execute(prepared_id=result['prepared_id'])``.
         Resolve ENS names on ethereum with ``evm_resolve_ens`` before supplying ``from_address``.
         """
+        if prepared_id:
+            record = runtime.prepared_txs.get(prepared_id)
+            if record is None:
+                return _invalid_prepared_id(prepared_id)
+            if record.kind == "execute_envelope":
+                summary = _envelope_summary(record.payload, prepared_id=prepared_id)
+                return {"ok": True, "result": {"prepared_id": prepared_id, "envelope": summary}}
+            if record.kind == "lifi_prepared":
+                prepared = dict(record.payload)
+
         payload = TxPrepareLiFiInput(
             chain=chain,
             from_address=from_address,
             prepared=prepared,
+            prepared_id=prepared_id,
             route_id=route_id,
             transaction_request=transaction_request,
         )
@@ -443,6 +579,18 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         rid = route_id
         if rid is None and isinstance(prepared, dict):
             rid = prepared.get("route_id")
+        if out.get("ok") and isinstance(out.get("result"), dict):
+            envelope = out["result"].get("envelope")
+            if isinstance(envelope, dict):
+                stored_id = runtime.prepared_txs.put(
+                    kind="execute_envelope",
+                    payload=envelope,
+                    summary=_envelope_summary(envelope),
+                )
+                out["result"] = {
+                    "prepared_id": stored_id,
+                    "envelope": _envelope_summary(envelope, prepared_id=stored_id),
+                }
         log_swap_tool(
             name="tx_prepare_lifi_swap",
             wall_ms=(time.perf_counter() - t0) * 1000,
@@ -530,25 +678,50 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
 
     @tool(args_schema=TxExecuteToolArgs)
     def tx_execute(
-        envelope: dict[str, Any],
+        envelope: dict[str, Any] | None = None,
+        prepared_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Run simulate/policy/sign/broadcast for a prepared transaction envelope.
 
-        You MUST pass ``envelope``: normally the exact ``result['envelope']`` dict from a successful
-        ``tx_prepare_*`` tool. If you mistakenly pass ``swap_prepare``'s ``prepared`` object
-        (``route_id`` + ``transaction_request`` only), this tool will attempt to repair it by
-        running the LiFi prepare step using ``chainId`` / ``from`` inside ``transaction_request``.
+        Prefer ``prepared_id`` from ``swap_prepare`` or ``tx_prepare_lifi_swap`` for LiFi swaps.
+        Legacy callers may pass the exact ``result['envelope']`` dict from a successful
+        ``tx_prepare_*`` tool. If you mistakenly pass ``swap_prepare``'s legacy ``prepared`` object
+        (``route_id`` + ``transaction_request`` only), this tool attempts to repair it.
         """
-        fixed = _try_coerce_lifi_prepared_to_execute_envelope(envelope, prepare_lifi_g)
-        if fixed is not None:
-            SWAP_LOG.info(
-                "tx_execute auto-prepared LiFi envelope from mistaken prepared blob route_id=%s",
-                envelope.get("route_id") or envelope.get("routeId"),
-            )
-            envelope = fixed
+        if not prepared_id and isinstance(envelope, dict) and envelope.get("prepared_id"):
+            prepared_id = str(envelope["prepared_id"])
 
-        root = TxExecuteToolArgs(envelope=envelope, idempotency_key=idempotency_key)
+        if prepared_id:
+            record = runtime.prepared_txs.get(prepared_id)
+            if record is None:
+                return _invalid_prepared_id(prepared_id)
+            if record.kind == "execute_envelope":
+                envelope = dict(record.payload)
+            elif record.kind == "lifi_prepared":
+                fixed = _try_coerce_lifi_prepared_to_execute_envelope(
+                    dict(record.payload),
+                    prepare_lifi_g,
+                )
+                if fixed is None:
+                    return _invalid_prepared_id(prepared_id)
+                envelope = fixed
+
+        if isinstance(envelope, dict):
+            fixed = _try_coerce_lifi_prepared_to_execute_envelope(envelope, prepare_lifi_g)
+            if fixed is not None:
+                SWAP_LOG.info(
+                    "tx_execute auto-prepared LiFi envelope from mistaken prepared blob "
+                    "route_id=%s",
+                    envelope.get("route_id") or envelope.get("routeId"),
+                )
+                envelope = fixed
+
+        root = TxExecuteToolArgs(
+            envelope=envelope,
+            prepared_id=prepared_id,
+            idempotency_key=idempotency_key,
+        )
         execute_in = TxExecuteInput.model_validate(root.model_dump()).model_dump()
         t0 = time.perf_counter()
         out = _graph_payload(execute_g.invoke({"input": execute_in}))

@@ -11,6 +11,7 @@ from aurey.service.agent_trace import (
     AureyAgentTraceHandler,
     agent_trace_detail,
     build_agent_trace_handler,
+    format_exception_chain,
 )
 
 
@@ -44,6 +45,35 @@ def test_build_handler_when_enabled(monkeypatch) -> None:
     monkeypatch.setenv("AUREY_AGENT_TRACE", "1")
     h = build_agent_trace_handler(session_id="sess-x")
     assert isinstance(h, AureyAgentTraceHandler)
+
+
+def test_format_exception_chain_includes_cause() -> None:
+    inner = ValueError("inner-msg")
+    try:
+        raise RuntimeError("outer-msg") from inner
+    except RuntimeError as exc:
+        text = format_exception_chain(exc)
+    assert "RuntimeError" in text
+    assert "ValueError" in text
+    assert "inner-msg" in text
+
+
+def test_chain_error_includes_exc_type_and_chain(caplog) -> None:
+    h = AureyAgentTraceHandler(session_id="s", detail="info")
+    caplog.set_level(logging.WARNING, logger="aurey.agent.trace")
+    rid = uuid4()
+    try:
+        raise ValueError("leaf") from RuntimeError("root")
+    except ValueError as exc:
+        h.on_chain_error(
+            exc,
+            run_id=rid,
+            metadata={"langgraph_node": "model", "langgraph_step": 12},
+        )
+    assert "event=chain_error" in caplog.text
+    assert "exc_type=ValueError" in caplog.text
+    assert "ValueError" in caplog.text
+    assert "RuntimeError" in caplog.text
 
 
 def test_chain_start_tolerates_none_serialized_info_mode(caplog) -> None:
