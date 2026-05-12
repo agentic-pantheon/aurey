@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 
+from aurey.graphs.evm_codec import normalize_evm_address
 from aurey.reasoning.harness import ensure_aurey_wallet_harness, resolve_harness_model_spec
 from aurey.runtime import AureyRuntime
+from aurey.settings import AureySettings
 from aurey.tools.agent_tools import build_aurey_subgraph_tools
+
+_log = logging.getLogger(__name__)
 
 try:
     from deepagents import create_deep_agent as _create_deep_agent_impl
@@ -52,6 +57,26 @@ AUREY_DEEP_USER_PROMPT = (
 )
 
 
+def wallet_context_for_deep_agent_prompt(settings: AureySettings) -> str:
+    """Return a suffix for the deep agent system prompt, or an empty string if unset or invalid."""
+
+    raw = (settings.deep_agent_wallet_address or "").strip()
+    if not raw:
+        return ""
+    try:
+        addr = normalize_evm_address(raw)
+    except ValueError:
+        _log.warning(
+            "Ignoring invalid AUREY_DEEP_AGENT_WALLET_ADDRESS (must be a 0x-prefixed EVM address).",
+        )
+        return ""
+    return (
+        "\n\nPersistent operator context: primary EVM wallet is "
+        f"{addr}. Use it when the user says \"my wallet\" or omits wallet / "
+        "`from` arguments unless they specify otherwise."
+    )
+
+
 def _import_deepagents_create_agent():
     """Load Deep Agents entrypoints; single choke point for optional dependency / API drift."""
 
@@ -89,6 +114,7 @@ def create_aurey_deep_agent(
 
     tools = build_aurey_subgraph_tools(runtime)
     user_sys = AUREY_DEEP_USER_PROMPT.strip()
+    user_sys += wallet_context_for_deep_agent_prompt(runtime.settings)
     if extra_system_prompt and extra_system_prompt.strip():
         user_sys = f"{user_sys}\n\n{extra_system_prompt.strip()}"
 
@@ -102,4 +128,8 @@ def create_aurey_deep_agent(
     )
 
 
-__all__ = ["AUREY_DEEP_USER_PROMPT", "create_aurey_deep_agent"]
+__all__ = [
+    "AUREY_DEEP_USER_PROMPT",
+    "create_aurey_deep_agent",
+    "wallet_context_for_deep_agent_prompt",
+]

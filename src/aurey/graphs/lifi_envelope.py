@@ -9,7 +9,7 @@ from aurey.graphs.evm_codec import (
     normalize_evm_address,
     parse_evm_uint,
 )
-from aurey.graphs.results import PreparedTxEnvelope
+from aurey.graphs.results import EnvelopeSigningMode, PreparedTxEnvelope
 
 
 def lifi_transaction_request_to_envelope(
@@ -17,7 +17,8 @@ def lifi_transaction_request_to_envelope(
     chain_id: int,
     from_address: str,
     transaction_request: dict[str, Any],
-    signing_key_secret_path: str,
+    signing_key_secret_path: str | None = None,
+    signing_mode: EnvelopeSigningMode = "vault_key",
 ) -> PreparedTxEnvelope:
     """Normalize an ethers-style tx request from LiFi into our execute envelope.
 
@@ -76,6 +77,8 @@ def lifi_transaction_request_to_envelope(
     if tr.get("nonce") is not None:
         nonce = int(parse_evm_uint(tr["nonce"]))
 
+    secret_path = signing_key_secret_path if signing_mode == "vault_key" else None
+
     return PreparedTxEnvelope(
         kind="lifi_swap",
         chain_id=chain_id,
@@ -85,5 +88,6 @@ def lifi_transaction_request_to_envelope(
         value_hex=value_hex,
         gas_limit_hex=gas_limit_hex,
         nonce=nonce,
-        signing_key_secret_path=signing_key_secret_path,
+        signing_mode=signing_mode,
+        signing_key_secret_path=secret_path,
     )

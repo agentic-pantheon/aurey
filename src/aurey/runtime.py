@@ -9,6 +9,7 @@ from time import monotonic
 from typing import Any, Literal
 from uuid import uuid4
 
+from aurey.custody import OneClawEvmTransactionSigner
 from aurey.custody.secret_store import SecretStore
 from aurey.graphs.ports import EvmJsonRpcPort, HttpJsonPort, TxPipelinePort
 from aurey.settings import AureySettings
@@ -88,5 +89,6 @@ class AureyRuntime:
     evm_rpc_factory: Callable[[str], EvmJsonRpcPort]
     http: HttpJsonPort
     tx_pipeline: TxPipelinePort
+    oneclaw_evm_signer: OneClawEvmTransactionSigner | None = None
     lifi_base_url: str = "https://li.quest"
     prepared_txs: PreparedTransactionStore = field(default_factory=PreparedTransactionStore)

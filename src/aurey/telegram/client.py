@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import logging
 import queue
 import re
 from collections.abc import Callable
@@ -27,16 +28,105 @@ _TELEGRAM_MAX_MESSAGE_CHARS = 4096
 _TELEGRAM_CHUNK_TARGET_CHARS = 3600
 _TELEGRAM_TYPING_REFRESH_SEC = 4.0
 _TELEGRAM_STATUS_EDIT_THROTTLE_SEC = 1.25
-_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+_HEX_INLINE_BACKTICK_RE = re.compile(r"`(0x(?:[a-fA-F0-9]{64}|[a-fA-F0-9]{40}))`")
+_SKIP_ANCHORS_AND_CODE_RE = re.compile(
+    r"(<code>[\s\S]*?</code>|<a\b[^>]*>[\s\S]*?</a>)"
+)
+_TX_HASH_RE = re.compile(r"\b(0x[a-fA-F0-9]{64})\b")
+_ADDRESS_RE = re.compile(r"\b(0x[a-fA-F0-9]{40})\b")
+
+_CHAIN_EXPLORER_BY_ID: dict[int, str] = {
+    1: "https://etherscan.io",
+    8453: "https://basescan.org",
+    42161: "https://arbiscan.io",
+    10: "https://optimistic.etherscan.io",
+    137: "https://polygonscan.com",
+    56: "https://bscscan.com",
+    59144: "https://lineascan.build",
+    534352: "https://scrollscan.com",
+    324: "https://explorer.zksync.io",
+    43114: "https://snowtrace.io",
+}
+
+_CHAIN_ID_HINT_RE = re.compile(r"(?i)\bchain(?:\s+i?d|\s+#)?\s*(?:[:=]|is)\s*(?:(?:#|=\s*|id\s+)\s*)?(\d+)\b")
+_STANDALONE_CHAIN_ID_RE = re.compile(r"\b(8453|42161|59144|534352|43114)\b")
 
 
-def _format_inline_markdown(text: str) -> str:
+def _explicit_explorer_base_for_line(line: str) -> str | None:
+    """Return explorer URL when ``line`` signals a chain; ``None`` to inherit sticky paragraph context."""
+
+    m = _CHAIN_ID_HINT_RE.search(line)
+    if m is not None:
+        cid = int(m.group(1))
+        if cid in _CHAIN_EXPLORER_BY_ID:
+            return _CHAIN_EXPLORER_BY_ID[cid]
+    ms = _STANDALONE_CHAIN_ID_RE.search(line)
+    if ms is not None:
+        return _CHAIN_EXPLORER_BY_ID[int(ms.group(1))]
+    keyword_rules: list[tuple[re.Pattern[str], str]] = [
+        (re.compile(r"(?i)\b(?:base(?:\s+mainnet|\s+l2|\s+l2:?)?|\bon\s+base\b)(?!\s*i/o)"), _CHAIN_EXPLORER_BY_ID[8453]),
+        (re.compile(r"(?i)\b(?:usdc\s+on\s+base\b)"), _CHAIN_EXPLORER_BY_ID[8453]),
+        (re.compile(r"(?i)\b(?:arbitrum|arb\s+(?:mainnet|one))\b|\b42161\b"), _CHAIN_EXPLORER_BY_ID[42161]),
+        (re.compile(r"(?i)\b(?:optimism|op\s+(?:chain|stack|mainnet))\b"), _CHAIN_EXPLORER_BY_ID[10]),
+        (re.compile(r"(?i)\bpolygon\b|\b(?:matic\b)\s+(?:network|polygon)"), _CHAIN_EXPLORER_BY_ID[137]),
+        (re.compile(r"(?i)\b(?:bnb|bsc)\s+(?:smart\s+)?chain\b|\b(?:binance|bnb)\s+chain\b|\bbsc\b"), _CHAIN_EXPLORER_BY_ID[56]),
+        (re.compile(r"(?i)\blinea\b"), _CHAIN_EXPLORER_BY_ID[59144]),
+        (re.compile(r"(?i)\bscroll\b(?:\s+mainnet|\s+L2\b)?"), _CHAIN_EXPLORER_BY_ID[534352]),
+        (re.compile(r"(?i)\b(?:zk\s*s?ync|zkSync)\s+era\b"), _CHAIN_EXPLORER_BY_ID[324]),
+        (re.compile(r"(?i)\b(?:avalanche|avax)\b"), _CHAIN_EXPLORER_BY_ID[43114]),
+        (
+            re.compile(
+                r"(?i)\(\s*ethereum\s*\)|\b(?:ethereum\b|\beth(?:ereum)?(?:\s+mainnet|:|\))"
+                r"|\bweth\b\s*\(\s*ethereum\s*\)|(?:^|[\s(])eth(?:ereum)?(?:\)\s*[→:]|\s*mainnet))"
+            ),
+            _CHAIN_EXPLORER_BY_ID[1],
+        ),
+    ]
+    for pat, base_url in keyword_rules:
+        if pat.search(line):
+            return base_url
+    return None
+
+
+def _link_evm_explorer_entities(html_fragment: str, *, explorer_base: str) -> str:
+    """Wrap tx hashes and contracts in Telegram-safe ``<a>`` URLs; ``html_fragment`` is already escaped."""
+
+    def _subs(segment: str) -> str:
+        def tx_repl(m: re.Match[str]) -> str:
+            h = m.group(1)
+            return f'<a href="{explorer_base}/tx/{h}">{h}</a>'
+
+        segment = _TX_HASH_RE.sub(tx_repl, segment)
+
+        def addr_repl(m: re.Match[str]) -> str:
+            a = m.group(1)
+            return f'<a href="{explorer_base}/address/{a}">{a}</a>'
+
+        return _ADDRESS_RE.sub(addr_repl, segment)
+
+    pieces = _SKIP_ANCHORS_AND_CODE_RE.split(html_fragment)
+    for i in range(0, len(pieces), 2):
+        pieces[i] = _subs(pieces[i])
+    return "".join(pieces)
+
+
+def _format_inline_markdown(text: str, *, explorer_base: str) -> str:
     """Small Markdown subset to Telegram HTML, after escaping user/model text."""
 
     escaped = html.escape(text, quote=False)
+
+    def _hex_backtick_repl(m: re.Match[str]) -> str:
+        inner = m.group(1)
+        if len(inner) == 66:
+            return f'<a href="{explorer_base}/tx/{inner}">{inner}</a>'
+        return f'<a href="{explorer_base}/address/{inner}">{inner}</a>'
+
+    escaped = _HEX_INLINE_BACKTICK_RE.sub(_hex_backtick_repl, escaped)
     escaped = _INLINE_CODE_RE.sub(lambda m: f"<code>{m.group(1)}</code>", escaped)
     escaped = _BOLD_RE.sub(lambda m: f"<b>{m.group(1)}</b>", escaped)
+    escaped = _link_evm_explorer_entities(escaped, explorer_base=explorer_base)
     return escaped
 
 
@@ -50,6 +140,13 @@ def format_telegram_message(text: str) -> str:
     out: list[str] = []
     in_code = False
     code_lines: list[str] = []
+    sticky_explorer = _CHAIN_EXPLORER_BY_ID[1]
+
+    def _update_sticky(fragment: str) -> None:
+        nonlocal sticky_explorer
+        cue = _explicit_explorer_base_for_line(fragment)
+        if cue is not None:
+            sticky_explorer = cue
 
     for raw in text.splitlines():
         line = raw.rstrip()
@@ -68,13 +165,20 @@ def format_telegram_message(text: str) -> str:
 
         stripped = line.strip()
         if stripped.startswith("### "):
-            out.append(f"<b>{_format_inline_markdown(stripped[4:])}</b>")
+            body = stripped[4:]
+            _update_sticky(body)
+            out.append(f"<b>{_format_inline_markdown(body, explorer_base=sticky_explorer)}</b>")
         elif stripped.startswith("## "):
-            out.append(f"<b>{_format_inline_markdown(stripped[3:])}</b>")
+            body = stripped[3:]
+            _update_sticky(body)
+            out.append(f"<b>{_format_inline_markdown(body, explorer_base=sticky_explorer)}</b>")
         elif stripped.startswith("# "):
-            out.append(f"<b>{_format_inline_markdown(stripped[2:])}</b>")
+            body = stripped[2:]
+            _update_sticky(body)
+            out.append(f"<b>{_format_inline_markdown(body, explorer_base=sticky_explorer)}</b>")
         else:
-            out.append(_format_inline_markdown(line))
+            _update_sticky(line)
+            out.append(_format_inline_markdown(line, explorer_base=sticky_explorer))
 
     if in_code:
         out.append(f"<pre>{html.escape(chr(10).join(code_lines), quote=False)}</pre>")
@@ -383,6 +487,24 @@ def build_telegram_application(
     app = Application.builder().token(bot_token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+
+    _telegram_log = logging.getLogger("aurey.telegram.bot")
+    from telegram.error import Conflict as TelegramConflict
+
+    async def _telegram_error_handler(
+        update: object,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        err = context.error
+        if isinstance(err, TelegramConflict):
+            _telegram_log.error(
+                "Telegram Conflict while handling an update — another client may be "
+                "calling getUpdates with the same bot token. Stop duplicate pollers."
+            )
+            return
+        _telegram_log.error("Telegram handler raised", exc_info=err)
+
+    app.add_error_handler(_telegram_error_handler)
     return app
 
 

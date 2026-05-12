@@ -5,12 +5,14 @@ from __future__ import annotations
 import re
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from eth_account import Account
 from web3 import Web3
 from web3.exceptions import TimeExhausted
 
+from aurey.custody import OneClawEvmTransactionSigner
 from aurey.custody.errors import SecretNotFoundError, SecretStoreUnavailableError
 from aurey.custody.secret_store import SecretStore
 from aurey.graphs.chains import alchemy_rpc_url_for_chain, chain_name_for_id
@@ -55,6 +57,29 @@ def _simulation_failed(
     return RuntimeError(msg)
 
 
+@dataclass(frozen=True)
+class _PreparedUnsignedContext:
+    """Context after unsigned tx simulation; ready for signing and broadcast."""
+
+    w3: Web3
+    chain_name: str
+    tx_body: dict[str, Any]
+    mark: Callable[..., None]
+
+
+def _decode_signed_raw_tx_hex(signed_tx: str) -> bytes:
+    stripped = signed_tx.strip()
+    if not stripped:
+        raise RuntimeError("policy_rejected: signer returned empty signed_tx.")
+    if stripped.startswith("0x"):
+        stripped = stripped[2:]
+    try:
+        return bytes.fromhex(stripped)
+    except ValueError as exc:
+        msg = f"policy_rejected: signer returned invalid signed_tx hex ({exc})."
+        raise RuntimeError(msg) from exc
+
+
 class Web3TxPipeline(TxPipelinePort):
     """Alchemy JSON-RPC via HTTP: estimate gas, fees, eth.call, local sign, send_rawTransaction."""
 
@@ -73,24 +98,12 @@ class Web3TxPipeline(TxPipelinePort):
             lambda url: Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": 60}))
         )
 
-    def run_prepared(
-        self,
-        envelope: PreparedTxEnvelope,
-        *,
-        signing_key_material_hex: str,
-    ) -> TxExecuteResult:
-        key_hex = _normalize_signing_key_hex(signing_key_material_hex)
-        try:
-            signer = Account.from_key(key_hex)
-        except Exception as exc:
-            raise RuntimeError("policy_rejected: invalid signing key material.") from exc
-
-        if signer.address.lower() != envelope.from_address.lower():
-            raise RuntimeError("policy_rejected: signing key does not match from_address.")
-
+    def _prepare_unsigned_transaction(
+        self, envelope: PreparedTxEnvelope
+    ) -> _PreparedUnsignedContext:
         t_pipe = time.perf_counter()
 
-        def _mark(stage: str, **kw: Any) -> None:
+        def mark(stage: str, **kw: Any) -> None:
             if envelope.kind != "lifi_swap":
                 return
             tail = ("  " + "  ".join(f"{k}={v}" for k, v in sorted(kw.items()))) if kw else ""
@@ -102,14 +115,6 @@ class Web3TxPipeline(TxPipelinePort):
                 addr_short(envelope.from_address),
                 addr_short(envelope.to),
                 tail,
-            )
-
-        if envelope.kind == "lifi_swap":
-            SWAP_LOG.info(
-                "lifi_pipeline run_prepared begin chain_id=%s from=%s to=%s",
-                envelope.chain_id,
-                addr_short(envelope.from_address),
-                addr_short(envelope.to),
             )
 
         alchemy_path = (self._settings.alchemy_api_secret_path or "").strip()
@@ -130,7 +135,7 @@ class Web3TxPipeline(TxPipelinePort):
         if not api_key:
             raise RuntimeError("policy_rejected: Alchemy API key is empty.")
 
-        _mark("alchemy_key_ready")
+        mark("alchemy_key_ready")
 
         chain_name = chain_name_for_id(envelope.chain_id)
         if chain_name is None:
@@ -145,7 +150,7 @@ class Web3TxPipeline(TxPipelinePort):
         if int(w3.eth.chain_id) != envelope.chain_id:
             raise RuntimeError("simulation_failed: RPC chain id does not match envelope.")
 
-        _mark("web3_connected")
+        mark("web3_connected")
 
         from_cs = Web3.to_checksum_address(envelope.from_address)
         to_cs = Web3.to_checksum_address(envelope.to)
@@ -179,7 +184,7 @@ class Web3TxPipeline(TxPipelinePort):
             except Exception as exc:
                 raise _simulation_failed(envelope, exc, step="gas estimation failed") from exc
 
-        _mark("gas_ready", gas_limit=gas_limit)
+        mark("gas_ready", gas_limit=gas_limit)
 
         fee_fields = _tx_fee_fields(w3)
         tx_body: dict[str, Any] = {**base, "gas": gas_limit, **fee_fields}
@@ -197,32 +202,133 @@ class Web3TxPipeline(TxPipelinePort):
         except Exception as exc:
             raise _simulation_failed(envelope, exc, step="eth_call simulation failed") from exc
 
-        _mark("simulation_ok")
+        mark("simulation_ok")
 
-        try:
-            signed = Account.sign_transaction(tx_body, key_hex)
-        except Exception as exc:
-            raise RuntimeError(f"policy_rejected: transaction signing failed ({exc}).") from exc
+        return _PreparedUnsignedContext(
+            w3=w3,
+            chain_name=chain_name,
+            tx_body=tx_body,
+            mark=mark,
+        )
 
-        _mark("signed")
-
-        raw = signed.raw_transaction
-        raw_bytes = raw if isinstance(raw, (bytes, bytearray)) else bytes(raw)
-
+    def _broadcast_signed_raw_and_wait(
+        self,
+        w3: Web3,
+        raw_bytes: bytes,
+        *,
+        mark: Callable[..., None],
+    ) -> tuple[str, TxReceiptSummary]:
         try:
             tx_hash = w3.eth.send_raw_transaction(raw_bytes)
         except Exception as exc:
             raise RuntimeError(f"broadcast_failed: {exc}") from exc
 
         tx_hash_hex = Web3.to_hex(tx_hash)
-        _mark("broadcast_submitted", tx_hash=tx_hash_hex)
+        mark("broadcast_submitted", tx_hash=tx_hash_hex)
 
         receipt = _wait_receipt(w3, tx_hash, self._receipt_timeout_s)
-        _mark(
+        mark(
             "receipt_done",
             status=receipt.status,
             block=receipt.block_number,
             gas_used=receipt.gas_used,
+        )
+
+        return tx_hash_hex, receipt
+
+    def run_prepared(
+        self,
+        envelope: PreparedTxEnvelope,
+        *,
+        signing_key_material_hex: str,
+    ) -> TxExecuteResult:
+        key_hex = _normalize_signing_key_hex(signing_key_material_hex)
+        try:
+            acct_signer = Account.from_key(key_hex)
+        except Exception as exc:
+            raise RuntimeError("policy_rejected: invalid signing key material.") from exc
+
+        if acct_signer.address.lower() != envelope.from_address.lower():
+            raise RuntimeError("policy_rejected: signing key does not match from_address.")
+
+        if envelope.kind == "lifi_swap":
+            SWAP_LOG.info(
+                "lifi_pipeline run_prepared begin chain_id=%s from=%s to=%s",
+                envelope.chain_id,
+                addr_short(envelope.from_address),
+                addr_short(envelope.to),
+            )
+
+        prepared = self._prepare_unsigned_transaction(envelope)
+
+        try:
+            signed = Account.sign_transaction(prepared.tx_body, key_hex)
+        except Exception as exc:
+            raise RuntimeError(f"policy_rejected: transaction signing failed ({exc}).") from exc
+
+        prepared.mark("signed")
+
+        raw = signed.raw_transaction
+        raw_bytes = raw if isinstance(raw, (bytes, bytearray)) else bytes(raw)
+
+        tx_hash_hex, receipt = self._broadcast_signed_raw_and_wait(
+            prepared.w3,
+            raw_bytes,
+            mark=prepared.mark,
+        )
+
+        return TxExecuteResult(
+            tx_hash=tx_hash_hex,
+            receipt=receipt,
+            stages={
+                "simulate": "ok",
+                "policy": "ok",
+                "sign": "ok",
+                "broadcast": "ok",
+            },
+        )
+
+    def run_prepared_with_oneclaw_signer(
+        self,
+        envelope: PreparedTxEnvelope,
+        signer: OneClawEvmTransactionSigner,
+        *,
+        agent_id: str,
+    ) -> TxExecuteResult:
+        if envelope.kind == "lifi_swap":
+            SWAP_LOG.info(
+                "lifi_pipeline run_prepared_with_oneclaw_signer begin chain_id=%s from=%s to=%s",
+                envelope.chain_id,
+                addr_short(envelope.from_address),
+                addr_short(envelope.to),
+            )
+
+        prepared = self._prepare_unsigned_transaction(envelope)
+
+        try:
+            signing_key_path = envelope.signing_key_secret_path
+            sign_out = signer.sign_evm_transaction(
+                agent_id=agent_id,
+                chain=prepared.chain_name,
+                transaction=prepared.tx_body,
+                signing_key_path=signing_key_path,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"policy_rejected: transaction signing failed ({exc}).") from exc
+
+        if sign_out.from_address is not None and sign_out.from_address.strip():
+            if sign_out.from_address.strip().lower() != envelope.from_address.lower():
+                raise RuntimeError(
+                    "policy_rejected: signer from_address does not match envelope from_address."
+                )
+
+        raw_bytes = _decode_signed_raw_tx_hex(sign_out.signed_tx)
+        prepared.mark("signed")
+
+        tx_hash_hex, receipt = self._broadcast_signed_raw_and_wait(
+            prepared.w3,
+            raw_bytes,
+            mark=prepared.mark,
         )
 
         return TxExecuteResult(

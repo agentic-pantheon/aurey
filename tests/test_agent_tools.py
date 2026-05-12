@@ -11,6 +11,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 
 from aurey.custody import FakeSecretStore
 from aurey.graphs import DeterministicTxPipeline, TxExecuteInput
+from aurey.graphs.evm_codec import normalize_evm_address
 from aurey.reasoning import create_aurey_deep_agent, make_memory_checkpointer, thread_config
 from aurey.reasoning import deep_agent as deep_agent_mod
 from aurey.runtime import AureyRuntime
@@ -474,6 +475,36 @@ def test_tx_execute_tool_rejects_idempotency_key_without_envelope():
         tool.invoke({"idempotency_key": "usdc-to-weth-base-1"})
 
 
+def test_tx_execute_tool_oneclaw_intents_requires_runtime_signer():
+    settings = AureySettings(
+        evm_signing_mode="oneclaw_intents",
+        oneclaw_agent_id="agent-tool",
+        wallet_signing_key_secret_path=None,
+    )
+    runtime = AureyRuntime(
+        settings=settings,
+        secret_store=FakeSecretStore({}),
+        evm_rpc_factory=rpc_factory_from_mapping({}),
+        http=ScriptedHttpClient(),
+        tx_pipeline=DeterministicTxPipeline(),
+        lifi_base_url="https://li.quest",
+    )
+    envelope = {
+        "kind": "native_transfer",
+        "chain_id": 8453,
+        "from_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "to": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "data": "0x",
+        "value_hex": "0x1",
+        "signing_mode": "oneclaw_intents",
+        "signing_key_secret_path": None,
+    }
+    tool = _tool_by_name(build_aurey_subgraph_tools(runtime), "tx_execute")
+    out = tool.invoke({"envelope": envelope})
+    assert out["ok"] is False
+    assert out["error"]["code"] == "secret_not_configured"
+
+
 def test_create_aurey_deep_agent_compiles():
     signing_path = "vault/signing/local"
     secrets = {signing_path: "0x" + "ff" * 32}
@@ -511,3 +542,33 @@ def test_create_aurey_deep_agent_import_error_message(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="deepagents"):
         create_aurey_deep_agent(runtime, model=_DummyChat())
+
+
+def test_wallet_context_for_deep_agent_prompt_empty():
+    assert deep_agent_mod.wallet_context_for_deep_agent_prompt(AureySettings()) == ""
+    assert deep_agent_mod.wallet_context_for_deep_agent_prompt(
+        AureySettings(deep_agent_wallet_address="  "),
+    ) == ""
+
+
+def test_wallet_context_for_deep_agent_prompt_valid():
+    addr = "0xd8da6bf26964af9d7eed9e03e53415d37aa96045"
+    out = deep_agent_mod.wallet_context_for_deep_agent_prompt(
+        AureySettings(deep_agent_wallet_address=addr),
+    )
+    assert out
+    assert "Persistent operator context" in out
+    assert normalize_evm_address(addr) in out
+
+
+def test_wallet_context_for_deep_agent_prompt_invalid(caplog):
+    import logging as _logging
+
+    caplog.set_level(_logging.WARNING)
+    out = deep_agent_mod.wallet_context_for_deep_agent_prompt(
+        AureySettings(deep_agent_wallet_address="not-an-address"),
+    )
+    assert out == ""
+    assert any(
+        "AUREY_DEEP_AGENT_WALLET_ADDRESS" in r.getMessage() for r in caplog.records
+    )

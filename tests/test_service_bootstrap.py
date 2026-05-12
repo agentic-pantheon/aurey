@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from aurey.custody import FakeSecretStore
+from aurey.custody.secret_store import OneClawHttpClient
 from aurey.graphs import DeterministicTxPipeline
 from aurey.reasoning import create_aurey_deep_agent, make_memory_checkpointer, thread_config
 from aurey.runtime import AureyRuntime
@@ -45,6 +46,22 @@ def test_bootstrap_raises_on_missing_bootstrap_env(monkeypatch):
     s = AureySettings(oneclaw_vault_id="v1")
     with pytest.raises(AureyServiceBootstrapError, match="Bootstrap 1Claw API key"):
         bootstrap_aurey_service_state(s)
+
+
+def test_bootstrap_oneclaw_evm_signer_is_same_as_secret_store_client(monkeypatch):
+    monkeypatch.setenv("AUREY_ONECLAW_BOOTSTRAP_API_KEY", "k")
+    clients: list[OneClawHttpClient] = []
+
+    def capture_client(*args: object, **kwargs: object) -> OneClawHttpClient:
+        client = OneClawHttpClient(*args, **kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr("aurey.service.bootstrap.OneClawHttpClient", capture_client)
+    s = AureySettings(oneclaw_vault_id="v-bootstrap-signer")
+    state = bootstrap_aurey_service_state(s)
+    assert len(clients) == 1
+    assert state.runtime.oneclaw_evm_signer is clients[0]
 
 
 def test_construct_service_state_get_graph_invoke_smoke(monkeypatch):

@@ -25,6 +25,10 @@ class EmptySecretValueError(SecretStoreError):
         self.path = path
 
 
+class OneClawSigningError(RuntimeError):
+    """Raised when 1Claw returns a signing response that cannot be used (no secrets in messages)."""
+
+
 class SecretStoreUnavailableError(SecretStoreError):
     """Raised when the backing secret store cannot be reached or queried."""
 

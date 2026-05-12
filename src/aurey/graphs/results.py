@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from aurey.graphs.evm_codec import normalize_contract_calldata
 
@@ -144,9 +144,16 @@ class SwapPrepareResult(BaseModel):
 
 TxKind = Literal["native_transfer", "erc20_transfer", "erc20_approval", "lifi_swap"]
 
+EnvelopeSigningMode = Literal["vault_key", "oneclaw_intents"]
+
 
 class PreparedTxEnvelope(BaseModel):
-    """Serializable transaction intent; signing material is referenced by vault path only."""
+    """Serializable transaction intent.
+
+    Vault-key flows reference raw signing material via ``signing_key_secret_path``.
+    ``oneclaw_intents`` may carry the same field as a 1Claw ``signing_key_path`` override,
+    but Aurey never reads that key locally.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -158,7 +165,19 @@ class PreparedTxEnvelope(BaseModel):
     value_hex: str
     gas_limit_hex: str | None = None
     nonce: int | None = None
-    signing_key_secret_path: str = Field(min_length=1)
+    signing_mode: EnvelopeSigningMode = "vault_key"
+    signing_key_secret_path: str | None = None
+
+    @model_validator(mode="after")
+    def _enforce_signing_mode_secret_path_rules(self) -> Self:
+        if self.signing_mode == "vault_key":
+            path = self.signing_key_secret_path
+            if path is None or not path.strip():
+                raise ValueError(
+                    "signing_key_secret_path must be non-empty when "
+                    "signing_mode is 'vault_key'"
+                )
+        return self
 
     @field_validator("data")
     @classmethod
