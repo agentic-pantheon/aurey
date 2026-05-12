@@ -7,7 +7,7 @@ from typing import Any
 
 import ormsgpack
 
-from aurey.custody import FakeSecretStore
+from aurey.custody import FakeOneClawClient, FakeSecretStore, OneClawEvmTransactionSigner
 from aurey.graphs import (
     DeterministicTxPipeline,
     build_alchemy_graph,
@@ -53,6 +53,7 @@ def _runtime(
     settings: AureySettings,
     http: HttpJsonPort,
     rpc_map: dict[str, object],
+    oneclaw_evm_signer: OneClawEvmTransactionSigner | None = None,
 ) -> AureyRuntime:
     return AureyRuntime(
         settings=settings,
@@ -61,6 +62,7 @@ def _runtime(
         http=http,
         tx_pipeline=DeterministicTxPipeline(),
         lifi_base_url="https://li.quest",
+        oneclaw_evm_signer=oneclaw_evm_signer,
     )
 
 
@@ -1110,3 +1112,158 @@ def test_tx_execute_simulation_failure():
     assert out.get("result") is None
     assert out["error"]["code"] == "simulation_failed"
     assert "simulation_failed" in out["error"]["message"]
+
+
+def test_tx_prepare_and_execute_oneclaw_intents_roundtrip():
+    settings = AureySettings(
+        evm_signing_mode="oneclaw_intents",
+        oneclaw_agent_id="agent-oc-1",
+        wallet_signing_key_secret_path=None,
+    )
+    signer = FakeOneClawClient()
+    runtime = _runtime(
+        secrets={},
+        settings=settings,
+        http=ScriptedHttpClient(),
+        rpc_map={},
+        oneclaw_evm_signer=signer,
+    )
+    prepare = build_tx_prepare_graph(runtime).invoke(
+        {
+            "input": {
+                "kind": "native_transfer",
+                "chain": "base",
+                "from_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "to_address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "value_wei": 9,
+            }
+        }
+    )
+    assert prepare.get("error") is None
+    envelope = prepare["result"]["envelope"]
+    assert envelope["signing_mode"] == "oneclaw_intents"
+
+    execute = build_tx_execute_graph(runtime).invoke({"input": {"envelope": envelope}})
+    assert execute.get("error") is None
+    assert execute["result"]["tx_hash"].startswith("0x")
+    _assert_no_banned_values(execute)
+
+
+def test_tx_execute_oneclaw_requires_agent_id():
+    settings = AureySettings(
+        evm_signing_mode="oneclaw_intents",
+        oneclaw_agent_id=None,
+        wallet_signing_key_secret_path=None,
+    )
+    signer = FakeOneClawClient()
+    runtime = _runtime(
+        secrets={},
+        settings=settings,
+        http=ScriptedHttpClient(),
+        rpc_map={},
+        oneclaw_evm_signer=signer,
+    )
+    envelope = {
+        "kind": "native_transfer",
+        "chain_id": 8453,
+        "from_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "to": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "data": "0x",
+        "value_hex": "0x1",
+        "signing_mode": "oneclaw_intents",
+        "signing_key_secret_path": None,
+    }
+    out = build_tx_execute_graph(runtime).invoke({"input": {"envelope": envelope}})
+    assert out.get("result") is None
+    assert out["error"]["code"] == "secret_not_configured"
+    assert "oneclaw_agent_id" in out["error"]["message"]
+
+
+def test_tx_execute_oneclaw_requires_runtime_signer():
+    settings = AureySettings(
+        evm_signing_mode="oneclaw_intents",
+        oneclaw_agent_id="agent-x",
+        wallet_signing_key_secret_path=None,
+    )
+    runtime = _runtime(
+        secrets={},
+        settings=settings,
+        http=ScriptedHttpClient(),
+        rpc_map={},
+        oneclaw_evm_signer=None,
+    )
+    envelope = {
+        "kind": "native_transfer",
+        "chain_id": 8453,
+        "from_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "to": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "data": "0x",
+        "value_hex": "0x2",
+        "signing_mode": "oneclaw_intents",
+        "signing_key_secret_path": None,
+    }
+    out = build_tx_execute_graph(runtime).invoke({"input": {"envelope": envelope}})
+    assert out.get("result") is None
+    assert out["error"]["code"] == "secret_not_configured"
+    assert "signer" in out["error"]["message"].lower()
+
+
+def test_tx_execute_rejects_oneclaw_envelope_when_operator_uses_vault_key():
+    signing_path = "vault/signing/local"
+    secrets = {signing_path: "0x" + "ff" * 32}
+    settings = AureySettings(
+        evm_signing_mode="vault_key",
+        wallet_signing_key_secret_path=signing_path,
+    )
+    runtime = _runtime(
+        secrets=secrets,
+        settings=settings,
+        http=ScriptedHttpClient(),
+        rpc_map={},
+    )
+    envelope = {
+        "kind": "native_transfer",
+        "chain_id": 8453,
+        "from_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "to": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "data": "0x",
+        "value_hex": "0x1",
+        "signing_mode": "oneclaw_intents",
+        "signing_key_secret_path": None,
+    }
+    out = build_tx_execute_graph(runtime).invoke({"input": {"envelope": envelope}})
+    assert out["error"]["code"] == "policy_rejected"
+    assert "signing_mode" in out["error"]["message"]
+
+
+def test_tx_execute_rejects_vault_envelope_when_operator_uses_oneclaw_intents():
+    signing_path = "vault/signing/local"
+    secrets = {signing_path: "0x" + "ff" * 32}
+    settings = AureySettings(
+        evm_signing_mode="oneclaw_intents",
+        oneclaw_agent_id="ag-99",
+        wallet_signing_key_secret_path=signing_path,
+    )
+    signer = FakeOneClawClient()
+    runtime = _runtime(
+        secrets=secrets,
+        settings=settings,
+        http=ScriptedHttpClient(),
+        rpc_map={},
+        oneclaw_evm_signer=signer,
+    )
+    envelope = {
+        "kind": "native_transfer",
+        "chain_id": 1,
+        "from_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "to": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "data": "0x",
+        "value_hex": "0x1",
+        "gas_limit_hex": None,
+        "nonce": None,
+        "signing_key_secret_path": signing_path,
+        "signing_mode": "vault_key",
+    }
+    out = build_tx_execute_graph(runtime).invoke({"input": {"envelope": envelope}})
+    assert out["error"]["code"] == "policy_rejected"
+    assert "signing_mode" in out["error"]["message"]

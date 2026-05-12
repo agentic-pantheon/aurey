@@ -8,6 +8,7 @@ from typing import Any, Literal, TypedDict
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, ValidationError
 
+from aurey.custody import OneClawEvmTransactionSigner
 from aurey.custody.errors import SecretNotFoundError, SecretStoreUnavailableError
 from aurey.graphs.ports import TxPipelinePort
 from aurey.graphs.results import (
@@ -47,56 +48,102 @@ def _validate_node(state: TxExecuteGraphState) -> TxExecuteGraphState:
     return {}
 
 
+def _pipeline_runtime_error_response(exc: RuntimeError) -> dict[str, Any]:
+    message = str(exc)
+    code: Literal["simulation_failed", "policy_rejected", "broadcast_failed"]
+    if message.startswith("simulation_failed"):
+        code = "simulation_failed"
+    elif message.startswith("policy_rejected"):
+        code = "policy_rejected"
+    elif message.startswith("broadcast_failed"):
+        code = "broadcast_failed"
+    else:
+        code = "simulation_failed"
+    return GraphErrorBody(
+        code=code,
+        message=message,
+        details=None,
+    ).model_dump()
+
+
 def _execute_node(runtime: AureyRuntime, state: TxExecuteGraphState) -> TxExecuteGraphState:
     if state.get("error"):
         return {}
 
     root = TxExecuteInput.model_validate(state["input"])
     envelope = PreparedTxEnvelope.model_validate(root.envelope)
-    key_path = envelope.signing_key_secret_path
-
-    try:
-        signing_material = runtime.secret_store.get_secret(key_path).reveal()
-    except SecretNotFoundError:
+    settings_mode = runtime.settings.evm_signing_mode
+    if envelope.signing_mode != settings_mode:
         return {
             "error": GraphErrorBody(
-                code="secret_not_found",
-                message="Signing secret could not be resolved.",
-                details={"secret_kind": "signing_key"},
-            ).model_dump()
-        }
-    except SecretStoreUnavailableError:
-        return {
-            "error": GraphErrorBody(
-                code="secret_unavailable",
-                message="Secret store unavailable while resolving signing material.",
-                details={"secret_kind": "signing_key"},
-            ).model_dump()
-        }
-
-    try:
-        outcome = runtime.tx_pipeline.run_prepared(
-            envelope,
-            signing_key_material_hex=signing_material,
-        )
-    except RuntimeError as exc:
-        message = str(exc)
-        code: Literal["simulation_failed", "policy_rejected", "broadcast_failed"]
-        if message.startswith("simulation_failed"):
-            code = "simulation_failed"
-        elif message.startswith("policy_rejected"):
-            code = "policy_rejected"
-        elif message.startswith("broadcast_failed"):
-            code = "broadcast_failed"
-        else:
-            code = "simulation_failed"
-        return {
-            "error": GraphErrorBody(
-                code=code,
-                message=message,
+                code="policy_rejected",
+                message=(
+                    f"Envelope signing_mode {envelope.signing_mode!r} does not match "
+                    f"operator evm_signing_mode {settings_mode!r}."
+                ),
                 details=None,
             ).model_dump()
         }
+
+    if envelope.signing_mode == "vault_key":
+        key_path = envelope.signing_key_secret_path
+        try:
+            signing_material = runtime.secret_store.get_secret(key_path).reveal()
+        except SecretNotFoundError:
+            return {
+                "error": GraphErrorBody(
+                    code="secret_not_found",
+                    message="Signing secret could not be resolved.",
+                    details={"secret_kind": "signing_key"},
+                ).model_dump()
+            }
+        except SecretStoreUnavailableError:
+            return {
+                "error": GraphErrorBody(
+                    code="secret_unavailable",
+                    message="Secret store unavailable while resolving signing material.",
+                    details={"secret_kind": "signing_key"},
+                ).model_dump()
+            }
+
+        try:
+            outcome = runtime.tx_pipeline.run_prepared(
+                envelope,
+                signing_key_material_hex=signing_material,
+            )
+        except RuntimeError as exc:
+            return {"error": _pipeline_runtime_error_response(exc)}
+
+        return {"result": outcome.model_dump()}
+
+    agent_id = runtime.settings.oneclaw_agent_id
+    if agent_id is None or not str(agent_id).strip():
+        return {
+            "error": GraphErrorBody(
+                code="secret_not_configured",
+                message="oneclaw_agent_id must be configured for oneclaw_intents execution.",
+                details=None,
+            ).model_dump()
+        }
+
+    signer = runtime.oneclaw_evm_signer
+    if signer is None:
+        return {
+            "error": GraphErrorBody(
+                code="secret_not_configured",
+                message="OneClaw EVM transaction signer is not configured on this runtime.",
+                details=None,
+            ).model_dump()
+        }
+
+    try:
+        outcome = runtime.tx_pipeline.run_prepared_with_oneclaw_signer(
+            envelope,
+            signer,
+            agent_id=str(agent_id).strip(),
+        )
+    except RuntimeError as exc:
+        return {"error": _pipeline_runtime_error_response(exc)}
 
     return {"result": outcome.model_dump()}
 
@@ -136,22 +183,7 @@ class DeterministicTxPipeline(TxPipelinePort):
     ) -> None:
         self._fail_stage = fail_stage
 
-    def run_prepared(
-        self,
-        envelope: PreparedTxEnvelope,
-        *,
-        signing_key_material_hex: str,
-    ) -> TxExecuteResult:
-        _ = signing_key_material_hex  # would feed a real signer in production
-        if self._fail_stage == "simulate":
-            raise RuntimeError("simulation_failed: deterministic test failure")
-
-        if self._fail_stage == "policy":
-            raise RuntimeError("policy_rejected: deterministic test failure")
-
-        if self._fail_stage == "broadcast":
-            raise RuntimeError("broadcast_failed: deterministic test failure")
-
+    def _deterministic_success(self, envelope: PreparedTxEnvelope) -> TxExecuteResult:
         payload = "|".join(
             [
                 str(envelope.chain_id),
@@ -171,3 +203,32 @@ class DeterministicTxPipeline(TxPipelinePort):
             "broadcast": "ok",
         }
         return TxExecuteResult(tx_hash=tx_hash, receipt=receipt, stages=stages)
+
+    def _maybe_raise_fail_stage(self) -> None:
+        if self._fail_stage == "simulate":
+            raise RuntimeError("simulation_failed: deterministic test failure")
+        if self._fail_stage == "policy":
+            raise RuntimeError("policy_rejected: deterministic test failure")
+        if self._fail_stage == "broadcast":
+            raise RuntimeError("broadcast_failed: deterministic test failure")
+
+    def run_prepared(
+        self,
+        envelope: PreparedTxEnvelope,
+        *,
+        signing_key_material_hex: str,
+    ) -> TxExecuteResult:
+        _ = signing_key_material_hex  # would feed a real signer in production
+        self._maybe_raise_fail_stage()
+        return self._deterministic_success(envelope)
+
+    def run_prepared_with_oneclaw_signer(
+        self,
+        envelope: PreparedTxEnvelope,
+        signer: OneClawEvmTransactionSigner,
+        *,
+        agent_id: str,
+    ) -> TxExecuteResult:
+        _ = signer, agent_id  # production path uses 1Claw HTTP signing
+        self._maybe_raise_fail_stage()
+        return self._deterministic_success(envelope)
