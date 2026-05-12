@@ -956,7 +956,7 @@ def test_tx_prepare_oneclaw_intents_native_envelope():
     settings = AureySettings(
         evm_signing_mode="oneclaw_intents",
         oneclaw_agent_id="agent-123",
-        wallet_signing_key_secret_path=None,
+        wallet_signing_key_secret_path="wallets/hot-wallet",
     )
     runtime = _runtime(secrets={}, settings=settings, http=ScriptedHttpClient(), rpc_map={})
     out = build_tx_prepare_graph(runtime).invoke(
@@ -973,7 +973,7 @@ def test_tx_prepare_oneclaw_intents_native_envelope():
     assert out.get("error") is None
     env = out["result"]["envelope"]
     assert env["signing_mode"] == "oneclaw_intents"
-    assert env.get("signing_key_secret_path") is None
+    assert env.get("signing_key_secret_path") == "wallets/hot-wallet"
 
 
 def test_tx_prepare_lifi_oneclaw_intents_envelope():

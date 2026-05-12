@@ -36,10 +36,10 @@ def _evm_prepare_signing_settings_error(runtime: AureyRuntime) -> dict[str, Any]
 
 def _prepared_tx_signing_kwargs(runtime: AureyRuntime) -> dict[str, Any]:
     mode = runtime.settings.evm_signing_mode
+    path = runtime.settings.wallet_signing_key_secret_path
     if mode == "vault_key":
-        path = runtime.settings.wallet_signing_key_secret_path
         return {"signing_mode": mode, "signing_key_secret_path": path.strip() if path else ""}
-    return {"signing_mode": mode, "signing_key_secret_path": None}
+    return {"signing_mode": mode, "signing_key_secret_path": path.strip() if path else None}
 
 
 class TxPrepareNative(BaseModel):

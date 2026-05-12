@@ -11,6 +11,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 
 from aurey.custody import FakeSecretStore
 from aurey.graphs import DeterministicTxPipeline, TxExecuteInput
+from aurey.graphs.evm_codec import normalize_evm_address
 from aurey.reasoning import create_aurey_deep_agent, make_memory_checkpointer, thread_config
 from aurey.reasoning import deep_agent as deep_agent_mod
 from aurey.runtime import AureyRuntime
@@ -541,3 +542,33 @@ def test_create_aurey_deep_agent_import_error_message(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="deepagents"):
         create_aurey_deep_agent(runtime, model=_DummyChat())
+
+
+def test_wallet_context_for_deep_agent_prompt_empty():
+    assert deep_agent_mod.wallet_context_for_deep_agent_prompt(AureySettings()) == ""
+    assert deep_agent_mod.wallet_context_for_deep_agent_prompt(
+        AureySettings(deep_agent_wallet_address="  "),
+    ) == ""
+
+
+def test_wallet_context_for_deep_agent_prompt_valid():
+    addr = "0xd8da6bf26964af9d7eed9e03e53415d37aa96045"
+    out = deep_agent_mod.wallet_context_for_deep_agent_prompt(
+        AureySettings(deep_agent_wallet_address=addr),
+    )
+    assert out
+    assert "Persistent operator context" in out
+    assert normalize_evm_address(addr) in out
+
+
+def test_wallet_context_for_deep_agent_prompt_invalid(caplog):
+    import logging as _logging
+
+    caplog.set_level(_logging.WARNING)
+    out = deep_agent_mod.wallet_context_for_deep_agent_prompt(
+        AureySettings(deep_agent_wallet_address="not-an-address"),
+    )
+    assert out == ""
+    assert any(
+        "AUREY_DEEP_AGENT_WALLET_ADDRESS" in r.getMessage() for r in caplog.records
+    )

@@ -74,7 +74,8 @@ class AureySettings(BaseSettings):
         default=None,
         description=(
             "1Claw vault path for signing material. Required when ``evm_signing_mode`` is "
-            "``vault_key``; not used for ``oneclaw_intents``."
+            "``vault_key``; used as a 1Claw ``signing_key_path`` override for "
+            "``oneclaw_intents``."
         ),
     )
     telegram_bot_token_secret_path: str | None = Field(
@@ -84,6 +85,14 @@ class AureySettings(BaseSettings):
     deep_agent_default_model: str = Field(
         default="openai:gpt-4o-mini",
         description="Default Deep Agents model spec when the HTTP API omits ``model``.",
+    )
+    deep_agent_wallet_address: str | None = Field(
+        default=None,
+        description=(
+            "Optional EVM address appended to the deep agent system prompt on every graph compile "
+            "(operator-defined long-term context). Checkpointed thread history remains separate "
+            "(see README / MemorySaver)."
+        ),
     )
 
     @property

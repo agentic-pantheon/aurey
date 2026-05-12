@@ -306,10 +306,12 @@ class Web3TxPipeline(TxPipelinePort):
         prepared = self._prepare_unsigned_transaction(envelope)
 
         try:
+            signing_key_path = envelope.signing_key_secret_path
             sign_out = signer.sign_evm_transaction(
                 agent_id=agent_id,
                 chain=prepared.chain_name,
                 transaction=prepared.tx_body,
+                signing_key_path=signing_key_path,
             )
         except Exception as exc:
             raise RuntimeError(f"policy_rejected: transaction signing failed ({exc}).") from exc

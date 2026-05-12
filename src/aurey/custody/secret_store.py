@@ -17,6 +17,74 @@ from aurey.custody.errors import (
 )
 
 
+def _http_error_snippet(exc: HTTPError, *, max_len: int = 800) -> str:
+    """Best-effort read of error response body without failing the caller."""
+
+    try:
+        fp = getattr(exc, "fp", None)
+        if fp is not None and hasattr(fp, "read"):
+            raw = fp.read()
+            if raw:
+                return raw.decode("utf-8", errors="replace").strip()[:max_len]
+    except Exception:
+        pass
+    return ""
+
+
+def _web3_tx_to_oneclaw_unified_flat(tx_body: dict[str, Any]) -> dict[str, Any]:
+    """Map a Web3/eth_account-style tx dict onto 1Claw unified ``/sign`` transaction fields.
+
+    1Claw expects *flat* JSON keys (`tx_type`, `gas_limit`, `max_fee_per_gas`, …); it does not
+    accept a nested ``transaction`` blob with camelCase EIP-1559 fields from Web3.py.
+    See https://docs.1claw.xyz/docs/guides/intents-api (Unified sign endpoint).
+    """
+
+    if "to" not in tx_body:
+        raise ValueError("transaction missing required key 'to'.")
+
+    raw_val = tx_body.get("value", 0)
+    value_wei = int(raw_val) if not isinstance(raw_val, str) else int(raw_val, 0)
+
+    data = tx_body.get("data", "0x")
+    if hasattr(data, "hex"):
+        hx = data.hex()
+        data = hx if hx.startswith("0x") else f"0x{hx}"
+    data_s = data if isinstance(data, str) else str(data)
+
+    nonce = int(tx_body["nonce"])
+    gas_any = tx_body.get("gas", tx_body.get("gasLimit"))
+    if gas_any is None:
+        raise ValueError("transaction missing 'gas' / 'gasLimit'.")
+    gas_limit = int(gas_any)
+
+    out: dict[str, Any] = {
+        "to": str(tx_body["to"]),
+        "data": data_s if data_s else "0x",
+        "nonce": nonce,
+        "gas_limit": gas_limit,
+        "value": str(value_wei),
+    }
+
+    mf = tx_body.get("maxFeePerGas")
+    mp = tx_body.get("maxPriorityFeePerGas")
+    gp = tx_body.get("gasPrice")
+
+    if mf is not None and mp is not None:
+        out["tx_type"] = 2
+        out["max_fee_per_gas"] = str(int(mf))
+        out["max_priority_fee_per_gas"] = str(int(mp))
+    elif gp is not None:
+        out["tx_type"] = 0
+        out["gas_price"] = str(int(gp))
+    else:
+        raise ValueError(
+            "transaction must include EIP-1559 fields maxFeePerGas and maxPriorityFeePerGas "
+            "or legacy gasPrice."
+        )
+
+    return out
+
+
 @dataclass(frozen=True, repr=False)
 class SecretValue:
     """Typed secret value whose raw string is only available by explicit reveal."""
@@ -78,6 +146,7 @@ class OneClawEvmTransactionSigner(Protocol):
         agent_id: str,
         chain: str,
         transaction: dict[str, Any],
+        signing_key_path: str | None = None,
     ) -> OneClawSignTransactionResult:
         """Request a signed EVM transaction for the given chain and unsigned fields."""
 
@@ -294,6 +363,7 @@ class OneClawHttpClient:
         agent_id: str,
         chain: str,
         transaction: dict[str, Any],
+        signing_key_path: str | None = None,
     ) -> OneClawSignTransactionResult:
         """Sign an unsigned EVM transaction via 1Claw unified signing."""
 
@@ -309,6 +379,7 @@ class OneClawHttpClient:
                 agent_id=ag,
                 chain=ch,
                 transaction=transaction,
+                signing_key_path=signing_key_path,
                 bearer=bearer,
             )
         except HTTPError as exc:
@@ -320,21 +391,27 @@ class OneClawHttpClient:
                         agent_id=ag,
                         chain=ch,
                         transaction=transaction,
+                        signing_key_path=signing_key_path,
                         bearer=bearer,
                     )
                 except HTTPError as exc2:
+                    snip2 = _http_error_snippet(exc2)
                     raise SecretStoreUnavailableError(
                         sign_path,
                         store_name="1Claw",
                         detail=(
                             "Unified signing failed after refreshing the agent token "
-                            f"(HTTP {exc2.code})."
+                            f"(HTTP {exc2.code}).{f' Body: {snip2}' if snip2 else ''}"
                         ),
                     ) from exc2
+            snip = _http_error_snippet(exc)
+            body_note = f" Body: {snip}" if snip else ""
             raise SecretStoreUnavailableError(
                 sign_path,
                 store_name="1Claw",
-                detail=f"Unified signing failed with HTTP {exc.code}.",
+                detail=(
+                    f"Unified signing failed with HTTP {exc.code}.{body_note}"
+                ),
             ) from exc
 
     def _http_post_agent_sign(
@@ -343,17 +420,32 @@ class OneClawHttpClient:
         agent_id: str,
         chain: str,
         transaction: dict[str, Any],
+        signing_key_path: str | None,
         bearer: str,
     ) -> OneClawSignTransactionResult:
         sign_path_suffix = f"v1/agents/{quote(agent_id, safe='')}/sign"
         sign_path = f"/{sign_path_suffix}"
         url = f"{self._base_url}/{sign_path_suffix}"
+        try:
+            flat_tx = _web3_tx_to_oneclaw_unified_flat(transaction)
+        except ValueError as exc:
+            raise OneClawSigningError(
+                "Cannot convert Web3-style transaction payload for 1Claw unified sign "
+                f"({exc})."
+            ) from exc
+
         body = json.dumps(
             {
                 "intent_type": "transaction",
                 "chain": chain,
-                "transaction": transaction,
-            }
+                **flat_tx,
+                **(
+                    {"signing_key_path": signing_key_path.strip()}
+                    if signing_key_path and signing_key_path.strip()
+                    else {}
+                ),
+            },
+            separators=(",", ":"),
         ).encode("utf-8")
         request = Request(
             url,
@@ -423,10 +515,12 @@ class FakeOneClawClient:
         agent_id: str,
         chain: str,
         transaction: dict[str, Any],
+        signing_key_path: str | None = None,
     ) -> OneClawSignTransactionResult:
-        self.sign_requests.append(
-            {"agent_id": agent_id, "chain": chain, "transaction": dict(transaction)}
-        )
+        req = {"agent_id": agent_id, "chain": chain, "transaction": dict(transaction)}
+        if signing_key_path is not None:
+            req["signing_key_path"] = signing_key_path
+        self.sign_requests.append(req)
         if self._sign_exception is not None:
             raise self._sign_exception
         if self._sign_response is not None:

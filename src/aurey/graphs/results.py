@@ -150,8 +150,9 @@ EnvelopeSigningMode = Literal["vault_key", "oneclaw_intents"]
 class PreparedTxEnvelope(BaseModel):
     """Serializable transaction intent.
 
-    Vault-key flows reference signing material via ``signing_key_secret_path``.
-    ``oneclaw_intents`` envelopes omit secret-path wiring at preparation time.
+    Vault-key flows reference raw signing material via ``signing_key_secret_path``.
+    ``oneclaw_intents`` may carry the same field as a 1Claw ``signing_key_path`` override,
+    but Aurey never reads that key locally.
     """
 
     model_config = ConfigDict(frozen=True)

@@ -26,14 +26,26 @@ def main() -> None:
     level = getattr(logging, args.log_level.upper(), logging.DEBUG)
     configure_aurey_console_logging(level=level)
 
+    from telegram.error import Conflict
+
     from aurey.telegram import create_telegram_application
 
     _log.info("Building Telegram application …")
     app = create_telegram_application()
     _log.info(
-        "Starting long polling (Ctrl+C to stop). Per-message traces use logger aurey.turn."
+        "Starting long polling (Ctrl+C to stop). Per-message traces use logger aurey.turn. "
+        "If you see Conflict: terminate every other runner using this bot token (second "
+        "terminal, staging deploy, another IDE task)."
     )
-    app.run_polling()
+    try:
+        app.run_polling()
+    except Conflict as exc:
+        _log.error(
+            "Telegram rejected long polling (Conflict): another process already calls "
+            "getUpdates for this bot. Stop duplicates (another run_telegram.py, Cursor "
+            "terminal, Railway worker with polling, …) — only one poller may run."
+        )
+        raise SystemExit(2) from exc
 
 
 if __name__ == "__main__":

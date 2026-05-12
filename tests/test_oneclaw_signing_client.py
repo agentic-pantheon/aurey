@@ -56,6 +56,17 @@ def _make_urlopen_mock(
     return _open
 
 
+_MIN_WEB3_EIP1559_TX = {
+    "to": "0x1",
+    "data": "0x",
+    "value": 0,
+    "nonce": 0,
+    "gas": 21_000,
+    "maxFeePerGas": 30_000_000_000,
+    "maxPriorityFeePerGas": 2_000_000_000,
+}
+
+
 def test_fake_oneclaw_client_sign_evm_transaction_records_and_returns_default():
     client = FakeOneClawClient({"x": "y"})
     tx = {"to": "0xabc", "value": "0x0"}
@@ -99,7 +110,16 @@ def test_oneclaw_http_sign_evm_transaction_success():
         out = client.sign_evm_transaction(
             agent_id="my-agent",
             chain="ethereum",
-            transaction={"to": "0x1", "data": "0x"},
+            signing_key_path="wallets/hot-wallet",
+            transaction={
+                "to": "0x1",
+                "data": "0x",
+                "value": 0,
+                "nonce": 0,
+                "gas": 21_000,
+                "maxFeePerGas": 30_000_000_000,
+                "maxPriorityFeePerGas": 2_000_000_000,
+            },
         )
 
     assert out == OneClawSignTransactionResult(
@@ -120,7 +140,15 @@ def test_oneclaw_http_sign_evm_transaction_success():
     assert json.loads(sign_req.data.decode()) == {
         "intent_type": "transaction",
         "chain": "ethereum",
-        "transaction": {"to": "0x1", "data": "0x"},
+        "to": "0x1",
+        "data": "0x",
+        "value": "0",
+        "nonce": 0,
+        "gas_limit": 21000,
+        "tx_type": 2,
+        "max_fee_per_gas": "30000000000",
+        "max_priority_fee_per_gas": "2000000000",
+        "signing_key_path": "wallets/hot-wallet",
     }
 
 
@@ -146,7 +174,15 @@ def test_oneclaw_http_sign_retries_once_on_401():
         out = client.sign_evm_transaction(
             agent_id="a",
             chain="base",
-            transaction={"nonce": "1"},
+            transaction={
+                "to": "0x2",
+                "data": "0x",
+                "value": 0,
+                "nonce": 1,
+                "gas": 21_000,
+                "maxFeePerGas": 30_000_000_000,
+                "maxPriorityFeePerGas": 2_000_000_000,
+            },
         )
 
     assert out.signed_tx == "0xok"
@@ -178,8 +214,9 @@ def test_oneclaw_http_sign_maps_non_401_http_to_unavailable():
         side_effect=_make_urlopen_mock(actions, captured),
     ):
         client = OneClawHttpClient(base_url="https://claw.test", api_key="k")
+        tx = dict(_MIN_WEB3_EIP1559_TX)
         with pytest.raises(SecretStoreUnavailableError) as exc:
-            client.sign_evm_transaction(agent_id="a", chain="eth", transaction={})
+            client.sign_evm_transaction(agent_id="a", chain="eth", transaction=tx)
         assert "503" in str(exc.value)
 
 
@@ -194,8 +231,9 @@ def test_oneclaw_http_sign_maps_bad_json_to_unavailable():
         side_effect=_make_urlopen_mock(actions, captured),
     ):
         client = OneClawHttpClient(base_url="https://claw.test", api_key="k")
+        tx = dict(_MIN_WEB3_EIP1559_TX)
         with pytest.raises(SecretStoreUnavailableError):
-            client.sign_evm_transaction(agent_id="a", chain="eth", transaction={})
+            client.sign_evm_transaction(agent_id="a", chain="eth", transaction=tx)
 
 
 def test_oneclaw_http_sign_maps_missing_signed_tx_to_signing_error():

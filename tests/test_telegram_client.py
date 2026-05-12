@@ -125,6 +125,56 @@ def test_format_telegram_message_renders_common_markdown_as_html() -> None:
     assert "<pre>print('&lt;x&gt;')</pre>" in formatted
 
 
+def test_format_telegram_message_links_tx_and_address_to_explorers() -> None:
+    raw = (
+        "**Swapped**\n\n"
+        "- Approval tx (**USDC on Base**): 0x6f2d7bd436f5817f7f6b728d008728487b1fbdcf6a78eeb0d39bc33e3905f82c\n"
+        "- Swap + bridge tx (**WETH (Ethereum)**): "
+        "0x00481f71cfe4f9ccd5ead1acbd7ed3def662c66ea2a3369a348fbedd23e33be5\n\n"
+        "Recipient: 0x7a3e29106d238334b7134ddd824b7923bcf717d2"
+    )
+    formatted = format_telegram_message(raw)
+
+    assert (
+        '<a href="https://basescan.org/tx/0x6f2d7bd436f5817f7f6b728d008728487b1fbdcf6a78eeb0d39bc33e3905f82c"'
+        ">0x6f2d7bd436f5817f7f6b728d008728487b1fbdcf6a78eeb0d39bc33e3905f82c</a>"
+        in formatted
+    )
+    assert (
+        '<a href="https://etherscan.io/tx/0x00481f71cfe4f9ccd5ead1acbd7ed3def662c66ea2a3369a348fbedd23e33be5"'
+        ">0x00481f71cfe4f9ccd5ead1acbd7ed3def662c66ea2a3369a348fbedd23e33be5</a>"
+        in formatted
+    )
+    assert (
+        '<a href="https://etherscan.io/address/0x7a3e29106d238334b7134ddd824b7923bcf717d2"'
+        ">0x7a3e29106d238334b7134ddd824b7923bcf717d2</a>"
+        in formatted
+    )
+
+
+def test_format_telegram_message_skip_explorer_links_inside_inline_code() -> None:
+    h = "0x6f2d7bd436f5817f7f6b728d008728487b1fbdcf6a78eeb0d39bc33e3905f82c"
+    raw = f"USDC on Base and `approve()` then `{h}` and naked {h}"
+
+    formatted = format_telegram_message(raw)
+
+    assert "<code>approve()</code>" in formatted
+    assert f"<code>{h}</code>" not in formatted
+    assert formatted.count('<a href="https://basescan.org/tx/') == 2
+
+
+def test_format_telegram_message_inherits_explorer_for_isolated_tx_line() -> None:
+    raw = (
+        "Done — sent USDC on Base from 0xc1923710468607b8b7db38a6afbb9b432744390c "
+        "to fabri (0x7a3e29106d238334b7134ddd824b7923bcf717d2).\n"
+        "\n"
+        "Tx hash: 0x2833a66dcbe971532c305548337d7c87f914d7b96b1f06408d6f11821914d582"
+    )
+    formatted = format_telegram_message(raw)
+
+    assert formatted.count('<a href="https://basescan.org/') == 3
+
+
 def test_telegram_message_chunks_splits_long_text_before_formatting() -> None:
     raw = "a" * 5000
 

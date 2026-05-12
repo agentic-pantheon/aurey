@@ -44,7 +44,9 @@ class _LocalOneClawSigner:
         agent_id: str,
         chain: str,
         transaction: dict,
+        signing_key_path: str | None = None,
     ) -> OneClawSignTransactionResult:
+        _ = signing_key_path
         key_hex = "0x" + self._acct.key.hex()
         signed = Account.sign_transaction(transaction, key_hex)
         raw = signed.raw_transaction
@@ -55,7 +57,12 @@ class _LocalOneClawSigner:
         )
 
 
-def _oneclaw_envelope(*, from_address: str, chain_id: int = 8453) -> PreparedTxEnvelope:
+def _oneclaw_envelope(
+    *,
+    from_address: str,
+    chain_id: int = 8453,
+    signing_key_secret_path: str | None = None,
+) -> PreparedTxEnvelope:
     return PreparedTxEnvelope(
         kind="native_transfer",
         chain_id=chain_id,
@@ -66,6 +73,7 @@ def _oneclaw_envelope(*, from_address: str, chain_id: int = 8453) -> PreparedTxE
         gas_limit_hex=None,
         nonce=None,
         signing_mode="oneclaw_intents",
+        signing_key_secret_path=signing_key_secret_path,
     )
 
 
@@ -138,13 +146,12 @@ def test_run_prepared_with_oneclaw_signer_success():
         web3_factory=lambda _url: mock_w3,
         receipt_timeout_s=5.0,
     )
-    env = _oneclaw_envelope(from_address=acct.address)
-
     class RecordingSigner(_LocalOneClawSigner):
         def __init__(self, account: Account) -> None:
             super().__init__(account)
             self.seen_chain: str | None = None
             self.seen_agent_id: str | None = None
+            self.seen_signing_key_path: str | None = None
 
         def sign_evm_transaction(
             self,
@@ -152,18 +159,32 @@ def test_run_prepared_with_oneclaw_signer_success():
             agent_id: str,
             chain: str,
             transaction: dict,
+            signing_key_path: str | None = None,
         ) -> OneClawSignTransactionResult:
             self.seen_agent_id = agent_id
             self.seen_chain = chain
+            self.seen_signing_key_path = signing_key_path
             return super().sign_evm_transaction(
-                agent_id=agent_id, chain=chain, transaction=transaction
+                agent_id=agent_id,
+                chain=chain,
+                transaction=transaction,
+                signing_key_path=signing_key_path,
             )
 
     signer = RecordingSigner(acct)
-    out = pipeline.run_prepared_with_oneclaw_signer(env, signer, agent_id="agent-1")
+    env_with_key_path = _oneclaw_envelope(
+        from_address=acct.address,
+        signing_key_secret_path="wallets/hot-wallet",
+    )
+    out = pipeline.run_prepared_with_oneclaw_signer(
+        env_with_key_path,
+        signer,
+        agent_id="agent-1",
+    )
 
     assert signer.seen_chain == "base"
     assert signer.seen_agent_id == "agent-1"
+    assert signer.seen_signing_key_path == "wallets/hot-wallet"
 
     assert out.tx_hash.startswith("0x")
     assert len(out.tx_hash) == 66
@@ -192,11 +213,17 @@ def test_run_prepared_with_oneclaw_signer_returns_wrong_from_address():
 
     class WrongFromSigner:
         def sign_evm_transaction(
-            self, *, agent_id: str, chain: str, transaction: dict
+            self,
+            *,
+            agent_id: str,
+            chain: str,
+            transaction: dict,
+            signing_key_path: str | None = None,
         ) -> OneClawSignTransactionResult:
             _ = agent_id
             _ = chain
             _ = transaction
+            _ = signing_key_path
             return OneClawSignTransactionResult(
                 signed_tx="0xabcd",
                 from_address=other.address,
@@ -211,7 +238,15 @@ def test_run_prepared_with_oneclaw_signer_sign_exception():
     mock_w3 = _mock_w3_for_success()
 
     class BoomSigner:
-        def sign_evm_transaction(self, *, agent_id: str, chain: str, transaction: dict) -> None:
+        def sign_evm_transaction(
+            self,
+            *,
+            agent_id: str,
+            chain: str,
+            transaction: dict,
+            signing_key_path: str | None = None,
+        ) -> None:
+            _ = agent_id, chain, transaction, signing_key_path
             raise ValueError("1claw unreachable")
 
     pipeline = Web3TxPipeline(
