@@ -51,6 +51,8 @@ With `DATABASE_URL` or `AUREY_DATABASE_URL` set and `aurey[api]` installed, the 
 
 ### Deploying on Railway
 
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/10EU4s?referralCode=WNfHEr&utm_medium=integration&utm_source=template&utm_campaign=generic)
+
 1. Create a **Postgres** service in the same Railway project as the app.
 2. On the app service, set `DATABASE_URL` to `${{Postgres.DATABASE_URL}}` (use the exact Postgres service name Railway shows; references are case-sensitive).
 3. Set the usual secrets: `AUREY_ONECLAW_VAULT_ID`, `AUREY_ONECLAW_BOOTSTRAP_API_KEY`, provider keys (e.g. `OPENAI_API_KEY`), and optional LangSmith vars (`LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`). See `.env.example`.
