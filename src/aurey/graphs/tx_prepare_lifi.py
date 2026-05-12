@@ -13,6 +13,7 @@ from aurey.graphs.evm_codec import normalize_evm_address
 from aurey.graphs.lifi_envelope import lifi_transaction_request_to_envelope
 from aurey.graphs.results import GraphErrorBody, LiFiPreparedTx
 from aurey.graphs.swap_diag import SWAP_LOG, addr_short
+from aurey.graphs.tx_prepare import _evm_prepare_signing_settings_error, _prepared_tx_signing_kwargs
 from aurey.runtime import AureyRuntime
 
 
@@ -99,13 +100,9 @@ def _validate_node(
             ).model_dump()
         }
 
-    if not runtime.settings.wallet_signing_key_secret_path:
-        return {
-            "error": GraphErrorBody(
-                code="secret_not_configured",
-                message="Wallet signing key secret path is not configured.",
-            ).model_dump()
-        }
+    err = _evm_prepare_signing_settings_error(runtime)
+    if err:
+        return {"error": err}
 
     try:
         normalize_evm_address(parsed.from_address)
@@ -141,7 +138,7 @@ def _execute_node(runtime: AureyRuntime, state: TxPrepareLiFiGraphState) -> TxPr
     chain = parsed.chain.strip().lower()
     cid = chain_id_for(chain)
     assert cid is not None
-    signing_path = runtime.settings.wallet_signing_key_secret_path or ""
+    signing = _prepared_tx_signing_kwargs(runtime)
     prepared = LiFiPreparedTx.model_validate(parsed.prepared)
 
     SWAP_LOG.info(
@@ -157,7 +154,8 @@ def _execute_node(runtime: AureyRuntime, state: TxPrepareLiFiGraphState) -> TxPr
             chain_id=cid,
             from_address=parsed.from_address,
             transaction_request=dict(prepared.transaction_request),
-            signing_key_secret_path=signing_path,
+            signing_mode=signing["signing_mode"],
+            signing_key_secret_path=signing["signing_key_secret_path"],
         )
     except ValueError as exc:
         SWAP_LOG.info(

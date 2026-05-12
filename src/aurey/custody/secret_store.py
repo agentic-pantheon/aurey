@@ -11,9 +11,78 @@ from urllib.request import Request, urlopen
 
 from aurey.custody.errors import (
     EmptySecretValueError,
+    OneClawSigningError,
     SecretNotFoundError,
     SecretStoreUnavailableError,
 )
+
+
+def _http_error_snippet(exc: HTTPError, *, max_len: int = 800) -> str:
+    """Best-effort read of error response body without failing the caller."""
+
+    try:
+        fp = getattr(exc, "fp", None)
+        if fp is not None and hasattr(fp, "read"):
+            raw = fp.read()
+            if raw:
+                return raw.decode("utf-8", errors="replace").strip()[:max_len]
+    except Exception:
+        pass
+    return ""
+
+
+def _web3_tx_to_oneclaw_unified_flat(tx_body: dict[str, Any]) -> dict[str, Any]:
+    """Map a Web3/eth_account-style tx dict onto 1Claw unified ``/sign`` transaction fields.
+
+    1Claw expects *flat* JSON keys (`tx_type`, `gas_limit`, `max_fee_per_gas`, …); it does not
+    accept a nested ``transaction`` blob with camelCase EIP-1559 fields from Web3.py.
+    See https://docs.1claw.xyz/docs/guides/intents-api (Unified sign endpoint).
+    """
+
+    if "to" not in tx_body:
+        raise ValueError("transaction missing required key 'to'.")
+
+    raw_val = tx_body.get("value", 0)
+    value_wei = int(raw_val) if not isinstance(raw_val, str) else int(raw_val, 0)
+
+    data = tx_body.get("data", "0x")
+    if hasattr(data, "hex"):
+        hx = data.hex()
+        data = hx if hx.startswith("0x") else f"0x{hx}"
+    data_s = data if isinstance(data, str) else str(data)
+
+    nonce = int(tx_body["nonce"])
+    gas_any = tx_body.get("gas", tx_body.get("gasLimit"))
+    if gas_any is None:
+        raise ValueError("transaction missing 'gas' / 'gasLimit'.")
+    gas_limit = int(gas_any)
+
+    out: dict[str, Any] = {
+        "to": str(tx_body["to"]),
+        "data": data_s if data_s else "0x",
+        "nonce": nonce,
+        "gas_limit": gas_limit,
+        "value": str(value_wei),
+    }
+
+    mf = tx_body.get("maxFeePerGas")
+    mp = tx_body.get("maxPriorityFeePerGas")
+    gp = tx_body.get("gasPrice")
+
+    if mf is not None and mp is not None:
+        out["tx_type"] = 2
+        out["max_fee_per_gas"] = str(int(mf))
+        out["max_priority_fee_per_gas"] = str(int(mp))
+    elif gp is not None:
+        out["tx_type"] = 0
+        out["gas_price"] = str(int(gp))
+    else:
+        raise ValueError(
+            "transaction must include EIP-1559 fields maxFeePerGas and maxPriorityFeePerGas "
+            "or legacy gasPrice."
+        )
+
+    return out
 
 
 @dataclass(frozen=True, repr=False)
@@ -55,6 +124,31 @@ class OneClawClient(Protocol):
 
     def get_secret(self, *, vault_id: str, path: str, agent_id: str | None = None) -> str:
         """Return the raw secret string for a path."""
+
+
+@dataclass(frozen=True)
+class OneClawSignTransactionResult:
+    """Parsed response from 1Claw unified EVM signing (``POST /v1/agents/{agent_id}/sign``)."""
+
+    signed_tx: str
+    tx_hash: str | None = None
+    from_address: str | None = None
+    tx_type: str | None = None
+
+
+@runtime_checkable
+class OneClawEvmTransactionSigner(Protocol):
+    """1Claw agent bearer flow for unified transaction signing."""
+
+    def sign_evm_transaction(
+        self,
+        *,
+        agent_id: str,
+        chain: str,
+        transaction: dict[str, Any],
+        signing_key_path: str | None = None,
+    ) -> OneClawSignTransactionResult:
+        """Request a signed EVM transaction for the given chain and unsigned fields."""
 
 
 class OneClawSecretStore:
@@ -263,6 +357,119 @@ class OneClawHttpClient:
             raise SecretNotFoundError(path)
         return value
 
+    def sign_evm_transaction(
+        self,
+        *,
+        agent_id: str,
+        chain: str,
+        transaction: dict[str, Any],
+        signing_key_path: str | None = None,
+    ) -> OneClawSignTransactionResult:
+        """Sign an unsigned EVM transaction via 1Claw unified signing."""
+
+        ag = agent_id.strip() if agent_id else ""
+        ch = chain.strip() if chain else ""
+        if not ag or not ch:
+            raise ValueError("agent_id and chain must be non-empty.")
+
+        sign_path = f"/v1/agents/{quote(ag, safe='')}/sign"
+        bearer = self._bearer_for_agent(ag)
+        try:
+            return self._http_post_agent_sign(
+                agent_id=ag,
+                chain=ch,
+                transaction=transaction,
+                signing_key_path=signing_key_path,
+                bearer=bearer,
+            )
+        except HTTPError as exc:
+            if exc.code == 401:
+                self._invalidate_access_token(ag)
+                bearer = self._bearer_for_agent(ag)
+                try:
+                    return self._http_post_agent_sign(
+                        agent_id=ag,
+                        chain=ch,
+                        transaction=transaction,
+                        signing_key_path=signing_key_path,
+                        bearer=bearer,
+                    )
+                except HTTPError as exc2:
+                    snip2 = _http_error_snippet(exc2)
+                    raise SecretStoreUnavailableError(
+                        sign_path,
+                        store_name="1Claw",
+                        detail=(
+                            "Unified signing failed after refreshing the agent token "
+                            f"(HTTP {exc2.code}).{f' Body: {snip2}' if snip2 else ''}"
+                        ),
+                    ) from exc2
+            snip = _http_error_snippet(exc)
+            body_note = f" Body: {snip}" if snip else ""
+            raise SecretStoreUnavailableError(
+                sign_path,
+                store_name="1Claw",
+                detail=(
+                    f"Unified signing failed with HTTP {exc.code}.{body_note}"
+                ),
+            ) from exc
+
+    def _http_post_agent_sign(
+        self,
+        *,
+        agent_id: str,
+        chain: str,
+        transaction: dict[str, Any],
+        signing_key_path: str | None,
+        bearer: str,
+    ) -> OneClawSignTransactionResult:
+        sign_path_suffix = f"v1/agents/{quote(agent_id, safe='')}/sign"
+        sign_path = f"/{sign_path_suffix}"
+        url = f"{self._base_url}/{sign_path_suffix}"
+        try:
+            flat_tx = _web3_tx_to_oneclaw_unified_flat(transaction)
+        except ValueError as exc:
+            raise OneClawSigningError(
+                "Cannot convert Web3-style transaction payload for 1Claw unified sign "
+                f"({exc})."
+            ) from exc
+
+        body = json.dumps(
+            {
+                "intent_type": "transaction",
+                "chain": chain,
+                **flat_tx,
+                **(
+                    {"signing_key_path": signing_key_path.strip()}
+                    if signing_key_path and signing_key_path.strip()
+                    else {}
+                ),
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        request = Request(
+            url,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {bearer}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=10) as response:
+                response_payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError:
+            raise
+        except (OSError, URLError, json.JSONDecodeError) as exc:
+            raise SecretStoreUnavailableError(
+                sign_path,
+                store_name="1Claw",
+                detail="Unified signing failed (network error or invalid JSON).",
+            ) from exc
+
+        return _parse_sign_transaction_response(response_payload)
+
 
 class FakeSecretStore:
     """In-memory SecretStore for tests."""
@@ -282,9 +489,18 @@ class FakeSecretStore:
 class FakeOneClawClient:
     """In-memory OneClawClient for wrapper tests."""
 
-    def __init__(self, secrets: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        secrets: dict[str, str] | None = None,
+        *,
+        sign_response: OneClawSignTransactionResult | None = None,
+        sign_exception: Exception | None = None,
+    ) -> None:
         self._secrets = dict(secrets or {})
         self.requests: list[dict[str, str | None]] = []
+        self._sign_response = sign_response
+        self._sign_exception = sign_exception
+        self.sign_requests: list[dict[str, Any]] = []
 
     def get_secret(self, *, vault_id: str, path: str, agent_id: str | None = None) -> str:
         self.requests.append({"vault_id": vault_id, "path": path, "agent_id": agent_id})
@@ -292,6 +508,54 @@ class FakeOneClawClient:
             return self._secrets[path]
         except KeyError as exc:
             raise SecretNotFoundError(path) from exc
+
+    def sign_evm_transaction(
+        self,
+        *,
+        agent_id: str,
+        chain: str,
+        transaction: dict[str, Any],
+        signing_key_path: str | None = None,
+    ) -> OneClawSignTransactionResult:
+        req = {"agent_id": agent_id, "chain": chain, "transaction": dict(transaction)}
+        if signing_key_path is not None:
+            req["signing_key_path"] = signing_key_path
+        self.sign_requests.append(req)
+        if self._sign_exception is not None:
+            raise self._sign_exception
+        if self._sign_response is not None:
+            return self._sign_response
+        return OneClawSignTransactionResult(
+            signed_tx="0xfake_signed_tx",
+            tx_hash="0xfake_tx_hash",
+            from_address="0xfake_from",
+            tx_type="2",
+        )
+
+
+def _parse_sign_transaction_response(payload: Any) -> OneClawSignTransactionResult:
+    if not isinstance(payload, dict):
+        raise OneClawSigningError("1Claw signing response was not a JSON object.")
+
+    signed_tx = payload.get("signed_tx")
+    if not isinstance(signed_tx, str) or not signed_tx.strip():
+        raise OneClawSigningError("1Claw signing response contained no usable `signed_tx`.")
+
+    tx_hash = payload.get("tx_hash")
+    tx_hash_out = tx_hash.strip() if isinstance(tx_hash, str) and tx_hash.strip() else None
+
+    from_raw = payload.get("from")
+    from_out = from_raw.strip() if isinstance(from_raw, str) and from_raw.strip() else None
+
+    tx_type = payload.get("tx_type")
+    tx_type_out = tx_type.strip() if isinstance(tx_type, str) and tx_type.strip() else None
+
+    return OneClawSignTransactionResult(
+        signed_tx=signed_tx.strip(),
+        tx_hash=tx_hash_out,
+        from_address=from_out,
+        tx_type=tx_type_out,
+    )
 
 
 def _extract_secret_value(payload: dict[str, Any]) -> str | None:

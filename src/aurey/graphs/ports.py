@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
+from aurey.custody import OneClawEvmTransactionSigner
 from aurey.graphs.results import PreparedTxEnvelope, TxExecuteResult
 
 
@@ -63,3 +64,12 @@ class TxPipelinePort(Protocol):
         signing_key_material_hex: str,
     ) -> TxExecuteResult:
         """Consume signing material in-process only; never embed it in the returned model."""
+
+    def run_prepared_with_oneclaw_signer(
+        self,
+        envelope: PreparedTxEnvelope,
+        signer: OneClawEvmTransactionSigner,
+        *,
+        agent_id: str,
+    ) -> TxExecuteResult:
+        """Sign via 1Claw and broadcast (``signing_mode`` oneclaw_intents)."""
