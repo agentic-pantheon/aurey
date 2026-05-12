@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import html
+import queue
 import re
+from collections.abc import Callable
 from typing import Any
+
+from langchain_core.callbacks import BaseCallbackHandler
 
 from aurey.custody.errors import SecretNotFoundError, SecretStoreUnavailableError
 from aurey.service.bootstrap import bootstrap_aurey_service_state
@@ -22,6 +26,7 @@ class TelegramConfigurationError(RuntimeError):
 _TELEGRAM_MAX_MESSAGE_CHARS = 4096
 _TELEGRAM_CHUNK_TARGET_CHARS = 3600
 _TELEGRAM_TYPING_REFRESH_SEC = 4.0
+_TELEGRAM_STATUS_EDIT_THROTTLE_SEC = 1.25
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 
@@ -127,6 +132,48 @@ def resolve_telegram_bot_token(state: AureyServiceState) -> str:
             "(POST /v1/auth/agent-token) rather than the Telegram secret; see chained error."
         ) from exc
 
+
+def _telegram_status_progress_html(label: str) -> str:
+    line = label.strip() or "…"
+    return f"<i>{html.escape(line)}</i>"
+
+
+class TelegramInvokeProgressCallback(BaseCallbackHandler):
+    """Feeds short, vague status lines while the LangGraph agent runs (Telegram UI)."""
+
+    def __init__(self, sink: Callable[[str], None]) -> None:
+        super().__init__()
+        self._sink = sink
+
+    @staticmethod
+    def _meta(kwargs: dict[str, Any]) -> dict[str, Any]:
+        m = kwargs.get("metadata")
+        return m if isinstance(m, dict) else {}
+
+    def on_chat_model_start(
+        self,
+        serialized: dict[str, Any] | None,
+        messages: list[list[Any]],
+        *,
+        run_id: Any,
+        **kwargs: Any,
+    ) -> None:
+        meta = self._meta(kwargs)
+        if meta.get("langgraph_node") == "model":
+            self._sink("Thinking…")
+
+    def on_tool_start(
+        self,
+        serialized: dict[str, Any] | None,
+        input_str: str,
+        *,
+        run_id: Any,
+        **kwargs: Any,
+    ) -> None:
+        _ = serialized, input_str, run_id, kwargs
+        self._sink("Gathering details…")
+
+
 def _last_text_message(result: AgentInvokeResult) -> str:
     text = reply_preview_from_summary(result.messages)
     return text if text else "Done."
@@ -139,6 +186,7 @@ def handle_telegram_text(
     text: str,
     user_id: int | str | None = None,
     model: str | None = None,
+    progress_sink: Callable[[str], None] | None = None,
 ) -> str:
     """Handle one inbound Telegram text message and return safe text for ``reply_text``."""
 
@@ -146,12 +194,14 @@ def handle_telegram_text(
     context: dict[str, Any] = {"telegram_chat_id": str(chat_id)}
     if user_id is not None:
         context["telegram_user_id"] = str(user_id)
+    extras = [TelegramInvokeProgressCallback(progress_sink)] if progress_sink is not None else None
     result = invoke_deep_agent_turn(
         state,
         message=text,
         session_id=session_id,
         context=context,
         model=model,
+        extra_callbacks=extras,
     )
     if result.ok:
         return _last_text_message(result)
@@ -188,27 +238,6 @@ def build_telegram_application(
         filters,
     ) = _import_telegram_ext()
     bot_token = token or resolve_telegram_bot_token(state)
-    from telegram.constants import ChatAction
-
-    async def _pump_typing_chat_action(
-        *,
-        bot: Any,
-        chat_id: int,
-        done: asyncio.Event,
-    ) -> None:
-        """Refresh ``typing``; Telegram clears it after a few seconds."""
-
-        while not done.is_set():
-            try:
-                await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-            except Exception:
-                pass
-            if done.is_set():
-                break
-            try:
-                await asyncio.wait_for(done.wait(), timeout=_TELEGRAM_TYPING_REFRESH_SEC)
-            except TimeoutError:
-                pass
 
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         _ = context
@@ -226,20 +255,7 @@ def build_telegram_application(
         chat_id_raw = getattr(chat, "id", None)
         chat_id_for_session = chat_id_raw if chat_id_raw is not None else "unknown"
 
-        done = asyncio.Event()
-
-        async def typing_or_wait() -> None:
-            if chat_id_raw is None:
-                await done.wait()
-                return
-            await _pump_typing_chat_action(
-                bot=context.bot,
-                chat_id=int(chat_id_raw),
-                done=done,
-            )
-
-        typing_task = asyncio.create_task(typing_or_wait())
-        try:
+        if chat_id_raw is None:
             reply = await asyncio.to_thread(
                 handle_telegram_text,
                 state,
@@ -248,13 +264,118 @@ def build_telegram_application(
                 text=msg.text,
                 model=model,
             )
+            for chunk in telegram_message_chunks(reply):
+                await msg.reply_text(
+                    format_telegram_message(chunk),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            return
+
+        chat_id_int = int(chat_id_raw)
+        from telegram.constants import ChatAction
+        from telegram.error import BadRequest
+
+        typing_done = asyncio.Event()
+
+        async def pump_typing() -> None:
+            """Refresh ``typing``; Telegram clears it after a few seconds."""
+            while not typing_done.is_set():
+                try:
+                    await context.bot.send_chat_action(chat_id=chat_id_int, action=ChatAction.TYPING)
+                except Exception:
+                    pass
+                if typing_done.is_set():
+                    break
+                try:
+                    await asyncio.wait_for(typing_done.wait(), timeout=_TELEGRAM_TYPING_REFRESH_SEC)
+                except TimeoutError:
+                    pass
+
+        typing_task = asyncio.create_task(pump_typing())
+
+        reply = ""
+        try:
+            progress_q: queue.SimpleQueue[str] = queue.SimpleQueue()
+
+            status_msg = await msg.reply_text(
+                _telegram_status_progress_html("Getting ready…"),
+                parse_mode="HTML",
+            )
+
+            invoke_task = asyncio.create_task(
+                asyncio.to_thread(
+                    handle_telegram_text,
+                    state,
+                    chat_id=chat_id_for_session,
+                    user_id=getattr(user, "id", None),
+                    text=msg.text,
+                    model=model,
+                    progress_sink=progress_q.put_nowait,
+                )
+            )
+
+            applied_label = ""
+            next_edit_at = 0.0
+            latest_line: str | None = None
+
+            async def flush_progress(*, force: bool) -> None:
+                nonlocal applied_label, next_edit_at, latest_line
+                if latest_line is None or latest_line == applied_label:
+                    return
+                now = asyncio.get_running_loop().time()
+                if not force and not invoke_task.done() and now < next_edit_at:
+                    return
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=chat_id_int,
+                        message_id=status_msg.message_id,
+                        text=_telegram_status_progress_html(latest_line),
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
+                    applied_label = latest_line
+                    next_edit_at = now + _TELEGRAM_STATUS_EDIT_THROTTLE_SEC
+                except BadRequest:
+                    pass
+
+            while not invoke_task.done():
+                await asyncio.sleep(0.35)
+                try:
+                    while True:
+                        latest_line = progress_q.get_nowait()
+                except queue.Empty:
+                    pass
+                await flush_progress(force=False)
+
+            reply = await invoke_task
+            try:
+                while True:
+                    latest_line = progress_q.get_nowait()
+            except queue.Empty:
+                pass
+            await flush_progress(force=True)
         finally:
-            done.set()
+            typing_done.set()
             await typing_task
 
-        for chunk in telegram_message_chunks(reply):
+        chunks = telegram_message_chunks(reply)
+        for idx, raw_chunk in enumerate(chunks):
+            body = format_telegram_message(raw_chunk)
+            if idx == 0:
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=chat_id_int,
+                        message_id=status_msg.message_id,
+                        text=body,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
+                    continue
+                except BadRequest:
+                    pass
             await msg.reply_text(
-                format_telegram_message(chunk),
+                body,
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
