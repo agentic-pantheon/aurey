@@ -835,6 +835,7 @@ def test_tx_prepare_lifi_swap_graph():
     assert env["value_hex"] == "0x0"
     assert env["gas_limit_hex"] == "0x5208"
     assert env["signing_key_secret_path"] == signing_path
+    assert env["signing_mode"] == "vault_key"
     _assert_no_banned_values(out)
 
 
