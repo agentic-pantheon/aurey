@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -21,6 +22,7 @@ from aurey.telegram import (
     resolve_telegram_bot_token,
     telegram_message_chunks,
 )
+from aurey.telegram.client import TelegramInvokeProgressCallback
 from tests.fakes.evm_rpc import rpc_factory_from_mapping
 from tests.fakes.http_client import ScriptedHttpClient
 from tests.leakage_helpers import (
@@ -28,6 +30,25 @@ from tests.leakage_helpers import (
     FAKE_TELEGRAM_BOT_TOKEN,
     assert_no_sensitive_leakage,
 )
+
+
+def _simulate_telegram_progress_events(cb: TelegramInvokeProgressCallback) -> None:
+    cb.on_chat_model_start(
+        None,
+        [[]],
+        run_id=uuid4(),
+        metadata={"langgraph_node": "model"},
+    )
+    cb.on_tool_start(None, "", run_id=uuid4(), metadata={"langgraph_node": "tools"})
+
+
+def _callbacks_from_invoke_config(config: dict[str, Any] | None) -> list[Any]:
+    if not config:
+        return []
+    raw = config.get("callbacks")
+    if raw is None:
+        return []
+    return raw if isinstance(raw, list) else [raw]
 
 
 class _RecordingGraph:
@@ -41,6 +62,9 @@ class _RecordingGraph:
         self.config = config
         if self.fail:
             raise RuntimeError(FAKE_ERROR_BODY_SECRET)
+        for cb in _callbacks_from_invoke_config(config):
+            if isinstance(cb, TelegramInvokeProgressCallback):
+                _simulate_telegram_progress_events(cb)
         return {"messages": [AIMessage(content="telegram ok")]}
 
 
@@ -99,6 +123,24 @@ def test_handle_telegram_text_reuses_shared_agent_invocation() -> None:
             "aurey_context": {"telegram_chat_id": "123", "telegram_user_id": "456"},
         }
     }
+
+
+def test_handle_telegram_text_progress_sink_receives_invoke_events() -> None:
+    graph = _RecordingGraph()
+    state = _FakeServiceState(graph)
+    captures: list[str] = []
+
+    reply = handle_telegram_text(
+        state,  # type: ignore[arg-type]
+        chat_id=1,
+        text="hi",
+        progress_sink=captures.append,
+    )
+
+    assert reply == "telegram ok"
+    assert captures == ["Thinking…", "Gathering details…"]
+    cbs = _callbacks_from_invoke_config(graph.config)
+    assert cbs and any(isinstance(c, TelegramInvokeProgressCallback) for c in cbs)
 
 
 def test_handle_telegram_text_sanitizes_agent_errors() -> None:

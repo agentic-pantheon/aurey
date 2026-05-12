@@ -112,6 +112,7 @@ def invoke_deep_agent_turn(
     session_id: str,
     context: dict[str, Any] | None = None,
     model: str | None = None,
+    extra_callbacks: list[Any] | None = None,
 ) -> AgentInvokeResult:
     """Invoke the shared deep-agent graph with sanitized error responses."""
 
@@ -148,15 +149,19 @@ def invoke_deep_agent_turn(
     if context is not None:
         extra["aurey_context"] = context
     config = thread_config(session_id, **extra)
+    merged: list[Any] = []
     trace_handler = build_agent_trace_handler(session_id=session_id)
     if trace_handler is not None:
-        prior = config.get("callbacks")
-        merged: list[Any] = [trace_handler]
-        if prior is not None:
-            if isinstance(prior, list):
-                merged.extend(prior)
-            else:
-                merged.append(prior)
+        merged.append(trace_handler)
+    prior = config.get("callbacks")
+    if prior is not None:
+        if isinstance(prior, list):
+            merged.extend(prior)
+        else:
+            merged.append(prior)
+    if extra_callbacks:
+        merged.extend(extra_callbacks)
+    if merged:
         config = {**config, "callbacks": merged}
 
     try:
