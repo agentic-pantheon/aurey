@@ -173,7 +173,8 @@ class PreparedTxEnvelope(BaseModel):
             path = self.signing_key_secret_path
             if path is None or not path.strip():
                 raise ValueError(
-                    "signing_key_secret_path must be a non-empty string when signing_mode is 'vault_key'"
+                    "signing_key_secret_path must be non-empty when "
+                    "signing_mode is 'vault_key'"
                 )
         return self
 
