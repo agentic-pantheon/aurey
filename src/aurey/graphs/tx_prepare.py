@@ -13,6 +13,35 @@ from aurey.graphs.results import GraphErrorBody, PreparedTxEnvelope
 from aurey.runtime import AureyRuntime
 
 
+def _evm_prepare_signing_settings_error(runtime: AureyRuntime) -> dict[str, Any] | None:
+    settings = runtime.settings
+    if settings.evm_signing_requires_wallet_signing_key_secret_path:
+        path = settings.wallet_signing_key_secret_path
+        if path is None or not str(path).strip():
+            return GraphErrorBody(
+                code="secret_not_configured",
+                message="Wallet signing key secret path is not configured.",
+            ).model_dump()
+    if settings.evm_signing_mode == "oneclaw_intents":
+        agent_id = settings.oneclaw_agent_id
+        if agent_id is None or not str(agent_id).strip():
+            return GraphErrorBody(
+                code="secret_not_configured",
+                message=(
+                    "oneclaw_agent_id must be configured when evm_signing_mode is oneclaw_intents."
+                ),
+            ).model_dump()
+    return None
+
+
+def _prepared_tx_signing_kwargs(runtime: AureyRuntime) -> dict[str, Any]:
+    mode = runtime.settings.evm_signing_mode
+    if mode == "vault_key":
+        path = runtime.settings.wallet_signing_key_secret_path
+        return {"signing_mode": mode, "signing_key_secret_path": path.strip() if path else ""}
+    return {"signing_mode": mode, "signing_key_secret_path": None}
+
+
 class TxPrepareNative(BaseModel):
     kind: Literal["native_transfer"] = "native_transfer"
     chain: str = Field(min_length=1)
@@ -81,13 +110,9 @@ def _validate_node(runtime: AureyRuntime, state: TxPrepareGraphState) -> TxPrepa
             ).model_dump()
         }
 
-    if not runtime.settings.wallet_signing_key_secret_path:
-        return {
-            "error": GraphErrorBody(
-                code="secret_not_configured",
-                message="Wallet signing key secret path is not configured.",
-            ).model_dump()
-        }
+    err = _evm_prepare_signing_settings_error(runtime)
+    if err:
+        return {"error": err}
 
     try:
         normalize_evm_address(parsed.from_address)
@@ -119,7 +144,7 @@ def _execute_node(runtime: AureyRuntime, state: TxPrepareGraphState) -> TxPrepar
     chain = parsed.chain.strip().lower()
     cid = chain_id_for(chain)
     assert cid is not None
-    signing_path = runtime.settings.wallet_signing_key_secret_path or ""
+    signing = _prepared_tx_signing_kwargs(runtime)
 
     if isinstance(parsed, TxPrepareNative):
         env = PreparedTxEnvelope(
@@ -131,7 +156,7 @@ def _execute_node(runtime: AureyRuntime, state: TxPrepareGraphState) -> TxPrepar
             value_hex=hex(parsed.value_wei),
             gas_limit_hex=None,
             nonce=None,
-            signing_key_secret_path=signing_path,
+            **signing,
         )
         return {"result": {"envelope": env.model_dump()}}
 
@@ -146,7 +171,7 @@ def _execute_node(runtime: AureyRuntime, state: TxPrepareGraphState) -> TxPrepar
             value_hex="0x0",
             gas_limit_hex=None,
             nonce=None,
-            signing_key_secret_path=signing_path,
+            **signing,
         )
         return {"result": {"envelope": env.model_dump()}}
 
@@ -161,7 +186,7 @@ def _execute_node(runtime: AureyRuntime, state: TxPrepareGraphState) -> TxPrepar
             value_hex="0x0",
             gas_limit_hex=None,
             nonce=None,
-            signing_key_secret_path=signing_path,
+            **signing,
         )
         return {"result": {"envelope": env.model_dump()}}
 

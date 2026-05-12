@@ -891,6 +891,124 @@ def test_tx_prepare_lifi_swap_then_execute_roundtrip():
     _assert_no_banned_values(execute)
 
 
+def test_tx_prepare_vault_key_requires_wallet_signing_path():
+    settings = AureySettings(evm_signing_mode="vault_key", wallet_signing_key_secret_path=None)
+    runtime = _runtime(secrets={}, settings=settings, http=ScriptedHttpClient(), rpc_map={})
+    out = build_tx_prepare_graph(runtime).invoke(
+        {
+            "input": {
+                "kind": "native_transfer",
+                "chain": "base",
+                "from_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "to_address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "value_wei": 1,
+            }
+        }
+    )
+    assert out["error"]["code"] == "secret_not_configured"
+
+
+def test_tx_prepare_vault_key_rejects_whitespace_only_signing_path():
+    settings = AureySettings(
+        evm_signing_mode="vault_key",
+        wallet_signing_key_secret_path="   ",
+    )
+    runtime = _runtime(secrets={}, settings=settings, http=ScriptedHttpClient(), rpc_map={})
+    out = build_tx_prepare_graph(runtime).invoke(
+        {
+            "input": {
+                "kind": "native_transfer",
+                "chain": "base",
+                "from_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "to_address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "value_wei": 1,
+            }
+        }
+    )
+    assert out["error"]["code"] == "secret_not_configured"
+
+
+def test_tx_prepare_oneclaw_intents_requires_agent_id():
+    settings = AureySettings(
+        evm_signing_mode="oneclaw_intents",
+        oneclaw_agent_id=None,
+        wallet_signing_key_secret_path=None,
+    )
+    runtime = _runtime(secrets={}, settings=settings, http=ScriptedHttpClient(), rpc_map={})
+    out = build_tx_prepare_graph(runtime).invoke(
+        {
+            "input": {
+                "kind": "native_transfer",
+                "chain": "base",
+                "from_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "to_address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "value_wei": 1,
+            }
+        }
+    )
+    assert out["error"]["code"] == "secret_not_configured"
+    assert "oneclaw_agent_id" in out["error"]["message"]
+
+
+def test_tx_prepare_oneclaw_intents_native_envelope():
+    settings = AureySettings(
+        evm_signing_mode="oneclaw_intents",
+        oneclaw_agent_id="agent-123",
+        wallet_signing_key_secret_path=None,
+    )
+    runtime = _runtime(secrets={}, settings=settings, http=ScriptedHttpClient(), rpc_map={})
+    out = build_tx_prepare_graph(runtime).invoke(
+        {
+            "input": {
+                "kind": "native_transfer",
+                "chain": "base",
+                "from_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "to_address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "value_wei": 3,
+            }
+        }
+    )
+    assert out.get("error") is None
+    env = out["result"]["envelope"]
+    assert env["signing_mode"] == "oneclaw_intents"
+    assert env.get("signing_key_secret_path") is None
+
+
+def test_tx_prepare_lifi_oneclaw_intents_envelope():
+    settings = AureySettings(
+        evm_signing_mode="oneclaw_intents",
+        oneclaw_agent_id="agent-xyz",
+        wallet_signing_key_secret_path=None,
+    )
+    runtime = _runtime(secrets={}, settings=settings, http=ScriptedHttpClient(), rpc_map={})
+    wallet = "0xc1923710468607b8b7db38a6afbb9b432744390c"
+    prepared = {
+        "route_id": "4026c5d3-23c3-494d-8c1e-b1c9ba89657c:0",
+        "transaction_request": {
+            "to": "0x1234567890123456789012345678901234567890",
+            "data": "0xcafe",
+            "value": "0x0",
+            "chainId": 8453,
+            "from": wallet,
+            "gasLimit": "0x5208",
+        },
+    }
+    out = build_tx_prepare_lifi_graph(runtime).invoke(
+        {
+            "input": {
+                "chain": "base",
+                "from_address": wallet,
+                "prepared": prepared,
+            }
+        }
+    )
+    assert out.get("error") is None
+    env = out["result"]["envelope"]
+    assert env["kind"] == "lifi_swap"
+    assert env["signing_mode"] == "oneclaw_intents"
+    assert env.get("signing_key_secret_path") is None
+
+
 def test_tx_prepare_and_execute_native_roundtrip():
     signing_path = "vault/signing/local"
     secrets = {
@@ -915,6 +1033,7 @@ def test_tx_prepare_and_execute_native_roundtrip():
     envelope = prepare["result"]["envelope"]
     assert envelope["kind"] == "native_transfer"
     assert envelope["data"] == "0x"
+    assert envelope["signing_mode"] == "vault_key"
     assert envelope["signing_key_secret_path"] == signing_path
     _assert_no_banned_values(prepare)
 

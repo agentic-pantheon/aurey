@@ -16,6 +16,23 @@ def test_normalize_contract_calldata_lowercases_and_rejects_odd_length():
         normalize_contract_calldata("0xabc")
 
 
+def test_lifi_mapper_oneclaw_intents_omits_signing_key_path():
+    env = lifi_transaction_request_to_envelope(
+        chain_id=8453,
+        from_address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        transaction_request={
+            "to": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "data": "0x",
+            "value": 0,
+            "chainId": 8453,
+        },
+        signing_mode="oneclaw_intents",
+        signing_key_secret_path=None,
+    )
+    assert env.signing_mode == "oneclaw_intents"
+    assert env.signing_key_secret_path is None
+
+
 def test_lifi_mapper_accepts_numeric_chain_id_and_value():
     env = lifi_transaction_request_to_envelope(
         chain_id=8453,
