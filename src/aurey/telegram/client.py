@@ -24,6 +24,16 @@ class TelegramConfigurationError(RuntimeError):
     """Telegram setup failed without exposing token paths or values."""
 
 
+def _telegram_chat_is_allowed(chat_id: int | None, allowed: frozenset[int] | None) -> bool:
+    """When ``allowed`` is set, only listed chats may invoke the bot."""
+
+    if allowed is None:
+        return True
+    if chat_id is None:
+        return False
+    return chat_id in allowed
+
+
 _TELEGRAM_MAX_MESSAGE_CHARS = 4096
 _TELEGRAM_CHUNK_TARGET_CHARS = 3600
 _TELEGRAM_TYPING_REFRESH_SEC = 4.0
@@ -342,9 +352,17 @@ def build_telegram_application(
         filters,
     ) = _import_telegram_ext()
     bot_token = token or resolve_telegram_bot_token(state)
+    allowed_chats = state.settings.telegram_allowed_chat_id_allowlist
+    gate_log = logging.getLogger("aurey.telegram.bot")
 
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         _ = context
+        chat = update.effective_chat
+        chat_id_raw = getattr(chat, "id", None)
+        cid_opt = int(chat_id_raw) if chat_id_raw is not None else None
+        if not _telegram_chat_is_allowed(cid_opt, allowed_chats):
+            gate_log.debug("Telegram /start ignored (disallowed chat_id=%r)", chat_id_raw)
+            return
         if update.effective_message is not None:
             await update.effective_message.reply_text(
                 "Aurey is ready. Send a message to invoke the agent."
@@ -357,6 +375,10 @@ def build_telegram_application(
         chat = update.effective_chat
         user = update.effective_user
         chat_id_raw = getattr(chat, "id", None)
+        cid_opt = int(chat_id_raw) if chat_id_raw is not None else None
+        if not _telegram_chat_is_allowed(cid_opt, allowed_chats):
+            gate_log.debug("Telegram message ignored (disallowed chat_id=%r)", chat_id_raw)
+            return
         chat_id_for_session = chat_id_raw if chat_id_raw is not None else "unknown"
 
         if chat_id_raw is None:

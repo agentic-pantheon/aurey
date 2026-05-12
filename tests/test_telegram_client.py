@@ -22,7 +22,7 @@ from aurey.telegram import (
     resolve_telegram_bot_token,
     telegram_message_chunks,
 )
-from aurey.telegram.client import TelegramInvokeProgressCallback
+from aurey.telegram.client import TelegramInvokeProgressCallback, _telegram_chat_is_allowed
 from tests.fakes.evm_rpc import rpc_factory_from_mapping
 from tests.fakes.http_client import ScriptedHttpClient
 from tests.leakage_helpers import (
@@ -30,6 +30,19 @@ from tests.leakage_helpers import (
     FAKE_TELEGRAM_BOT_TOKEN,
     assert_no_sensitive_leakage,
 )
+
+
+def test_telegram_chat_is_allowed_unrestricted() -> None:
+    assert _telegram_chat_is_allowed(None, None) is True
+    assert _telegram_chat_is_allowed(123, None) is True
+
+
+def test_telegram_chat_is_allowed_restricted() -> None:
+    allowed = frozenset({1, -100})
+    assert _telegram_chat_is_allowed(None, allowed) is False
+    assert _telegram_chat_is_allowed(1, allowed) is True
+    assert _telegram_chat_is_allowed(-100, allowed) is True
+    assert _telegram_chat_is_allowed(999, allowed) is False
 
 
 def _simulate_telegram_progress_events(cb: TelegramInvokeProgressCallback) -> None:
