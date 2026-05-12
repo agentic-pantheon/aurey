@@ -78,6 +78,8 @@ create_telegram_application().run_polling()
 
 Do not place the Telegram token in `.env`; only the 1Claw path belongs in configuration.
 
+To **restrict** which conversations can use the bot, set `AUREY_TELEGRAM_ALLOWED_CHAT_IDS` to a comma- or whitespace-separated list of numeric Telegram **chat** ids (omit or leave empty for no restriction). In a private chat with you, the chat id is the same as your user id; groups and supergroups use negative ids (often starting with `-100`). Discover ids by forwarding a message to a bot such as `@RawDataBot` or by temporarily logging `effective_chat.id` from updates.
+
 ## Development
 
 ```bash

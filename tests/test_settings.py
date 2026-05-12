@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from aurey.settings import AureySettings
+from aurey.settings import AureySettings, parse_telegram_allowed_chat_ids
 
 
 def test_settings_defaults():
@@ -21,6 +21,8 @@ def test_settings_defaults():
     assert s.evm_signing_requires_wallet_signing_key_secret_path is True
     assert s.wallet_signing_key_secret_path is None
     assert s.telegram_bot_token_secret_path is None
+    assert s.telegram_allowed_chat_ids is None
+    assert s.telegram_allowed_chat_id_allowlist is None
     assert s.deep_agent_default_model == "openai:gpt-4o-mini"
     assert s.database_url is None
 
@@ -98,3 +100,34 @@ def test_resolve_oneclaw_bootstrap_api_key_empty_env(monkeypatch):
     s = AureySettings(oneclaw_api_key_secret_source="EMPTY_KEY")
     with pytest.raises(ValueError):
         s.resolve_oneclaw_bootstrap_api_key()
+
+
+def test_parse_telegram_allowed_chat_ids() -> None:
+    assert parse_telegram_allowed_chat_ids(None) is None
+    assert parse_telegram_allowed_chat_ids("") is None
+    assert parse_telegram_allowed_chat_ids("  \t  ") is None
+    assert parse_telegram_allowed_chat_ids("1, -100") == frozenset({1, -100})
+    assert parse_telegram_allowed_chat_ids("1 -100") == frozenset({1, -100})
+    assert parse_telegram_allowed_chat_ids("1,,2") == frozenset({1, 2})
+    with pytest.raises(ValueError):
+        parse_telegram_allowed_chat_ids("1,notint")
+
+
+def test_settings_telegram_allowed_chat_ids_construct(monkeypatch) -> None:
+    monkeypatch.delenv("AUREY_TELEGRAM_ALLOWED_CHAT_IDS", raising=False)
+    s = AureySettings(telegram_allowed_chat_ids=" 42 , -99 ")
+    assert s.telegram_allowed_chat_ids == "42 , -99"
+    assert s.telegram_allowed_chat_id_allowlist == frozenset({42, -99})
+
+
+def test_settings_telegram_allowed_chat_ids_invalid(monkeypatch) -> None:
+    monkeypatch.delenv("AUREY_TELEGRAM_ALLOWED_CHAT_IDS", raising=False)
+    with pytest.raises(ValidationError):
+        AureySettings(telegram_allowed_chat_ids="1,bogus")
+
+
+def test_settings_telegram_allowed_chat_ids_env(monkeypatch) -> None:
+    monkeypatch.delenv("AUREY_TELEGRAM_ALLOWED_CHAT_IDS", raising=False)
+    monkeypatch.setenv("AUREY_TELEGRAM_ALLOWED_CHAT_IDS", "7,-8")
+    s = AureySettings()
+    assert s.telegram_allowed_chat_id_allowlist == frozenset({7, -8})

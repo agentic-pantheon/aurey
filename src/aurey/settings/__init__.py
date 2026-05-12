@@ -7,12 +7,40 @@ Note: Configuration lives in this package intentionally; do not add a sibling
 from __future__ import annotations
 
 import os
+import re
 from typing import Literal
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 EvmSigningMode = Literal["vault_key", "oneclaw_intents"]
+
+_TELEGRAM_ALLOWLIST_SPLIT_RE = re.compile(r"[\s,]+")
+
+
+def parse_telegram_allowed_chat_ids(raw: str | None) -> frozenset[int] | None:
+    """Parse ``AUREY_TELEGRAM_ALLOWED_CHAT_IDS`` value into a frozen set.
+
+    Returns ``None`` when ``raw`` is unset, empty, or whitespace-only (no restriction).
+    Raises ``ValueError`` when any token is not a valid integer.
+    """
+
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    ids: list[int] = []
+    for token in _TELEGRAM_ALLOWLIST_SPLIT_RE.split(stripped):
+        if not token:
+            continue
+        try:
+            ids.append(int(token))
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid Telegram chat id token {token!r} in AUREY_TELEGRAM_ALLOWED_CHAT_IDS."
+            ) from exc
+    return frozenset(ids) if ids else None
 
 
 class AureySettings(BaseSettings):
@@ -83,6 +111,13 @@ class AureySettings(BaseSettings):
         default=None,
         description="1Claw vault path for the Telegram bot token.",
     )
+    telegram_allowed_chat_ids: str | None = Field(
+        default=None,
+        description=(
+            "Comma- or whitespace-separated Telegram chat ids permitted to use the bot. "
+            "Unset or empty means no restriction."
+        ),
+    )
     deep_agent_default_model: str = Field(
         default="openai:gpt-4o-mini",
         description="Default Deep Agents model spec when the HTTP API omits ``model``.",
@@ -103,6 +138,23 @@ class AureySettings(BaseSettings):
         ),
         validation_alias=AliasChoices("AUREY_DATABASE_URL", "DATABASE_URL"),
     )
+
+    @field_validator("telegram_allowed_chat_ids")
+    @classmethod
+    def _telegram_allowed_chat_ids_syntax(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        stripped = v.strip()
+        if not stripped:
+            return None
+        parse_telegram_allowed_chat_ids(stripped)
+        return stripped
+
+    @property
+    def telegram_allowed_chat_id_allowlist(self) -> frozenset[int] | None:
+        """Frozen set of allowed chat ids, or ``None`` when the bot accepts any chat."""
+
+        return parse_telegram_allowed_chat_ids(self.telegram_allowed_chat_ids)
 
     @property
     def evm_signing_requires_wallet_signing_key_secret_path(self) -> bool:
