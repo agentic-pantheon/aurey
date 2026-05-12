@@ -8,10 +8,65 @@ import pytest
 from eth_account import Account
 from hexbytes import HexBytes
 
-from aurey.custody import FakeSecretStore
+from aurey.custody import FakeSecretStore, OneClawSignTransactionResult
 from aurey.graphs.evm_tx_pipeline import Web3TxPipeline
 from aurey.graphs.results import PreparedTxEnvelope
 from aurey.settings import AureySettings
+
+
+def _mock_w3_for_success() -> MagicMock:
+    mock_w3 = MagicMock()
+    mock_w3.eth.chain_id = 8453
+    mock_w3.eth.get_transaction_count.return_value = 0
+    mock_w3.eth.estimate_gas.return_value = 21_000
+    mock_w3.eth.max_priority_fee = 1_000_000_000
+    mock_w3.eth.get_block.return_value = {"baseFeePerGas": 2_000_000_000}
+    mock_w3.eth.get_balance.return_value = 10**20
+    mock_w3.eth.call.return_value = b""
+    mock_w3.eth.send_raw_transaction.return_value = HexBytes(b"\xab" * 32)
+    mock_w3.eth.wait_for_transaction_receipt.return_value = {
+        "status": 1,
+        "blockNumber": 1_000,
+        "gasUsed": 21_000,
+    }
+    return mock_w3
+
+
+class _LocalOneClawSigner:
+    """Signs tx_body locally like 1Claw would, for pipeline tests."""
+
+    def __init__(self, signing_account: Account) -> None:
+        self._acct = signing_account
+
+    def sign_evm_transaction(
+        self,
+        *,
+        agent_id: str,
+        chain: str,
+        transaction: dict,
+    ) -> OneClawSignTransactionResult:
+        key_hex = "0x" + self._acct.key.hex()
+        signed = Account.sign_transaction(transaction, key_hex)
+        raw = signed.raw_transaction
+        raw_bytes = raw if isinstance(raw, (bytes, bytearray)) else bytes(raw)
+        return OneClawSignTransactionResult(
+            signed_tx="0x" + raw_bytes.hex(),
+            from_address=self._acct.address,
+        )
+
+
+def _oneclaw_envelope(*, from_address: str, chain_id: int = 8453) -> PreparedTxEnvelope:
+    return PreparedTxEnvelope(
+        kind="native_transfer",
+        chain_id=chain_id,
+        from_address=from_address,
+        to="0x1111111111111111111111111111111111111111",
+        data="0x",
+        value_hex="0x0",
+        gas_limit_hex=None,
+        nonce=None,
+        signing_mode="oneclaw_intents",
+    )
 
 
 def _envelope(*, signer: Account, chain_id: int = 8453) -> PreparedTxEnvelope:
@@ -51,20 +106,7 @@ def test_run_prepared_address_mismatch():
 
 def test_run_prepared_success_with_mock_w3():
     signer = Account.create()
-    mock_w3 = MagicMock()
-    mock_w3.eth.chain_id = 8453
-    mock_w3.eth.get_transaction_count.return_value = 0
-    mock_w3.eth.estimate_gas.return_value = 21_000
-    mock_w3.eth.max_priority_fee = 1_000_000_000
-    mock_w3.eth.get_block.return_value = {"baseFeePerGas": 2_000_000_000}
-    mock_w3.eth.get_balance.return_value = 10**20
-    mock_w3.eth.call.return_value = b""
-    mock_w3.eth.send_raw_transaction.return_value = HexBytes(b"\xab" * 32)
-    mock_w3.eth.wait_for_transaction_receipt.return_value = {
-        "status": 1,
-        "blockNumber": 1_000,
-        "gasUsed": 21_000,
-    }
+    mock_w3 = _mock_w3_for_success()
 
     pipeline = Web3TxPipeline(
         settings=AureySettings(alchemy_api_secret_path="alchemy/k"),
@@ -84,6 +126,123 @@ def test_run_prepared_success_with_mock_w3():
     assert out.receipt.gas_used == 21_000
     mock_w3.eth.send_raw_transaction.assert_called_once()
     mock_w3.eth.wait_for_transaction_receipt.assert_called_once()
+
+
+def test_run_prepared_with_oneclaw_signer_success():
+    acct = Account.create()
+    mock_w3 = _mock_w3_for_success()
+
+    pipeline = Web3TxPipeline(
+        settings=AureySettings(alchemy_api_secret_path="alchemy/k"),
+        secret_store=FakeSecretStore({"alchemy/k": "test-alchemy-key"}),
+        web3_factory=lambda _url: mock_w3,
+        receipt_timeout_s=5.0,
+    )
+    env = _oneclaw_envelope(from_address=acct.address)
+
+    class RecordingSigner(_LocalOneClawSigner):
+        def __init__(self, account: Account) -> None:
+            super().__init__(account)
+            self.seen_chain: str | None = None
+            self.seen_agent_id: str | None = None
+
+        def sign_evm_transaction(
+            self,
+            *,
+            agent_id: str,
+            chain: str,
+            transaction: dict,
+        ) -> OneClawSignTransactionResult:
+            self.seen_agent_id = agent_id
+            self.seen_chain = chain
+            return super().sign_evm_transaction(
+                agent_id=agent_id, chain=chain, transaction=transaction
+            )
+
+    signer = RecordingSigner(acct)
+    out = pipeline.run_prepared_with_oneclaw_signer(env, signer, agent_id="agent-1")
+
+    assert signer.seen_chain == "base"
+    assert signer.seen_agent_id == "agent-1"
+
+    assert out.tx_hash.startswith("0x")
+    assert len(out.tx_hash) == 66
+    assert out.receipt.status == 1
+    assert out.stages == {
+        "simulate": "ok",
+        "policy": "ok",
+        "sign": "ok",
+        "broadcast": "ok",
+    }
+    mock_w3.eth.send_raw_transaction.assert_called_once()
+    mock_w3.eth.wait_for_transaction_receipt.assert_called_once()
+
+
+def test_run_prepared_with_oneclaw_signer_returns_wrong_from_address():
+    acct = Account.create()
+    other = Account.create()
+    mock_w3 = _mock_w3_for_success()
+    pipeline = Web3TxPipeline(
+        settings=AureySettings(alchemy_api_secret_path="alchemy/k"),
+        secret_store=FakeSecretStore({"alchemy/k": "test-alchemy-key"}),
+        web3_factory=lambda _url: mock_w3,
+        receipt_timeout_s=5.0,
+    )
+    env = _oneclaw_envelope(from_address=acct.address)
+
+    class WrongFromSigner:
+        def sign_evm_transaction(
+            self, *, agent_id: str, chain: str, transaction: dict
+        ) -> OneClawSignTransactionResult:
+            _ = agent_id
+            _ = chain
+            _ = transaction
+            return OneClawSignTransactionResult(
+                signed_tx="0xabcd",
+                from_address=other.address,
+            )
+
+    with pytest.raises(RuntimeError, match="policy_rejected.*from_address"):
+        pipeline.run_prepared_with_oneclaw_signer(env, WrongFromSigner(), agent_id="a")
+
+
+def test_run_prepared_with_oneclaw_signer_sign_exception():
+    acct = Account.create()
+    mock_w3 = _mock_w3_for_success()
+
+    class BoomSigner:
+        def sign_evm_transaction(self, *, agent_id: str, chain: str, transaction: dict) -> None:
+            raise ValueError("1claw unreachable")
+
+    pipeline = Web3TxPipeline(
+        settings=AureySettings(alchemy_api_secret_path="alchemy/k"),
+        secret_store=FakeSecretStore({"alchemy/k": "test-alchemy-key"}),
+        web3_factory=lambda _url: mock_w3,
+        receipt_timeout_s=5.0,
+    )
+    env = _oneclaw_envelope(from_address=acct.address)
+
+    with pytest.raises(RuntimeError, match="policy_rejected.*signing failed"):
+        pipeline.run_prepared_with_oneclaw_signer(env, BoomSigner(), agent_id="x")
+
+
+def test_run_prepared_with_oneclaw_signer_broadcast_failed():
+    acct = Account.create()
+    mock_w3 = _mock_w3_for_success()
+    mock_w3.eth.send_raw_transaction.side_effect = Exception("insufficient funds")
+
+    pipeline = Web3TxPipeline(
+        settings=AureySettings(alchemy_api_secret_path="alchemy/k"),
+        secret_store=FakeSecretStore({"alchemy/k": "test-alchemy-key"}),
+        web3_factory=lambda _url: mock_w3,
+        receipt_timeout_s=5.0,
+    )
+    env = _oneclaw_envelope(from_address=acct.address)
+
+    with pytest.raises(RuntimeError, match="broadcast_failed"):
+        pipeline.run_prepared_with_oneclaw_signer(
+            env, _LocalOneClawSigner(acct), agent_id="a"
+        )
 
 
 def test_simulation_failed_hint_for_erc20_balance_revert():
