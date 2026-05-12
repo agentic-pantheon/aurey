@@ -44,8 +44,19 @@ uv run uvicorn aurey.service.app:app --factory --host 127.0.0.1 --port 8000
 
 Endpoints:
 
-- `GET /health` - liveness (`{"ok": true}`).
+- `GET /health` - readiness (`{"ok": true}` when bootstrap succeeded, `{"ok": false}` if required wiring such as 1Claw is missing).
 - `POST /v1/invoke` - JSON body: `message`, `session_id`, optional `context` (stored under configurable `aurey_context`), optional `model`. Responses are structured (`InvokeResponse`); misconfiguration and agent failures use stable error codes without embedding secrets.
+
+With `DATABASE_URL` or `AUREY_DATABASE_URL` set and `aurey[api]` installed, the service uses a **PostgreSQL** LangGraph checkpointer (tables are created on startup via `setup()`). Without a DB URL it uses an in-memory saver.
+
+### Deploying on Railway
+
+1. Create a **Postgres** service in the same Railway project as the app.
+2. On the app service, set `DATABASE_URL` to `${{Postgres.DATABASE_URL}}` (use the exact Postgres service name Railway shows; references are case-sensitive).
+3. Set the usual secrets: `AUREY_ONECLAW_VAULT_ID`, `AUREY_ONECLAW_BOOTSTRAP_API_KEY`, provider keys (e.g. `OPENAI_API_KEY`), and optional LangSmith vars (`LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`). See `.env.example`.
+4. The repo includes [`railway.toml`](railway.toml) with `uv sync --extra api` and a Uvicorn start command bound to `0.0.0.0` and `$PORT`.
+
+The **Telegram** bot (`run_telegram.py`) is a separate process; run it as another Railway service if you need it in production.
 
 For tests, inject `state=` into `create_fastapi_application` or monkeypatch `create_aurey_deep_agent` so no live model or network is required.
 

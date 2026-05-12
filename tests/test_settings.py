@@ -22,6 +22,7 @@ def test_settings_defaults():
     assert s.wallet_signing_key_secret_path is None
     assert s.telegram_bot_token_secret_path is None
     assert s.deep_agent_default_model == "openai:gpt-4o-mini"
+    assert s.database_url is None
 
 
 def test_settings_env_override(monkeypatch):
@@ -29,6 +30,8 @@ def test_settings_env_override(monkeypatch):
     monkeypatch.delenv("AUREY_ONECLAW_VAULT_ID", raising=False)
     monkeypatch.delenv("AUREY_ALCHEMY_API_SECRET_PATH", raising=False)
     monkeypatch.delenv("AUREY_EVM_SIGNING_MODE", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("AUREY_DATABASE_URL", raising=False)
     monkeypatch.setenv("AUREY_ONECLAW_BASE_URL", "https://example.invalid/v1/")
     monkeypatch.setenv("AUREY_ONECLAW_VAULT_ID", "vault-env-123")
     monkeypatch.setenv("AUREY_ALCHEMY_API_SECRET_PATH", "aurey/apis/alchemy")
@@ -53,6 +56,22 @@ def test_settings_evm_signing_mode_invalid_rejected(monkeypatch):
 
     with pytest.raises(ValidationError):
         AureySettings()
+
+
+def test_settings_database_url_from_database_url_env(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("AUREY_DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgres://user:pass@db:5432/app")
+    s = AureySettings()
+    assert s.database_url == "postgres://user:pass@db:5432/app"
+
+
+def test_settings_database_url_aurey_prefixed(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("AUREY_DATABASE_URL", raising=False)
+    monkeypatch.setenv("AUREY_DATABASE_URL", "postgres://local/aurey")
+    s = AureySettings()
+    assert s.database_url == "postgres://local/aurey"
 
 
 def test_resolve_oneclaw_bootstrap_api_key(monkeypatch):

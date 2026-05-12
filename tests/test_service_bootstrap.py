@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
@@ -11,6 +13,7 @@ from aurey.custody import FakeSecretStore
 from aurey.custody.secret_store import OneClawHttpClient
 from aurey.graphs import DeterministicTxPipeline
 from aurey.reasoning import create_aurey_deep_agent, make_memory_checkpointer, thread_config
+from aurey.reasoning.checkpointer import ManagedPostgresCheckpointer
 from aurey.runtime import AureyRuntime
 from aurey.service.adapters import UrllibHttpJsonClient, make_evm_rpc_factory
 from aurey.service.bootstrap import AureyServiceBootstrapError, bootstrap_aurey_service_state
@@ -62,6 +65,41 @@ def test_bootstrap_oneclaw_evm_signer_is_same_as_secret_store_client(monkeypatch
     state = bootstrap_aurey_service_state(s)
     assert len(clients) == 1
     assert state.runtime.oneclaw_evm_signer is clients[0]
+
+
+def test_bootstrap_uses_postgres_when_database_url(monkeypatch):
+    monkeypatch.setenv("AUREY_ONECLAW_BOOTSTRAP_API_KEY", "k")
+    opened: list[str] = []
+
+    def fake_open(url: str) -> ManagedPostgresCheckpointer:
+        opened.append(url)
+        cm = MagicMock()
+        cm.__exit__ = MagicMock(return_value=False)
+        saver = MagicMock()
+        return ManagedPostgresCheckpointer(saver=saver, _cm=cm)
+
+    monkeypatch.setattr("aurey.service.bootstrap.open_postgres_checkpointer", fake_open)
+    s = AureySettings(oneclaw_vault_id="v-pg", database_url="postgres://stub")
+    state = bootstrap_aurey_service_state(s)
+    cm = state._postgres._cm
+    assert opened == ["postgres://stub"]
+    assert state.checkpointer is state._postgres.saver
+    assert state._postgres is not None
+    state.close_checkpointer()
+    assert state._postgres is None
+    cm.__exit__.assert_called_once()
+
+
+def test_bootstrap_postgres_failure_wrapped(monkeypatch):
+    monkeypatch.setenv("AUREY_ONECLAW_BOOTSTRAP_API_KEY", "k")
+
+    def boom(url: str) -> ManagedPostgresCheckpointer:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("aurey.service.bootstrap.open_postgres_checkpointer", boom)
+    s = AureySettings(oneclaw_vault_id="v-pg", database_url="postgres://stub")
+    with pytest.raises(AureyServiceBootstrapError, match="PostgreSQL checkpointer"):
+        bootstrap_aurey_service_state(s)
 
 
 def test_construct_service_state_get_graph_invoke_smoke(monkeypatch):

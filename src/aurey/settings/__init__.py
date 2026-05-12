@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from typing import Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 EvmSigningMode = Literal["vault_key", "oneclaw_intents"]
@@ -26,6 +26,7 @@ class AureySettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="AUREY_",
         extra="ignore",
+        populate_by_name=True,
     )
 
     oneclaw_base_url: str = Field(
@@ -93,6 +94,14 @@ class AureySettings(BaseSettings):
             "(operator-defined long-term context). Checkpointed thread history remains separate "
             "(see README / MemorySaver)."
         ),
+    )
+    database_url: str | None = Field(
+        default=None,
+        description=(
+            "Optional PostgreSQL URL for LangGraph checkpoint persistence. "
+            "Reads ``DATABASE_URL`` (e.g. Railway) or ``AUREY_DATABASE_URL``."
+        ),
+        validation_alias=AliasChoices("AUREY_DATABASE_URL", "DATABASE_URL"),
     )
 
     @property

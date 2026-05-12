@@ -19,6 +19,7 @@ from aurey.graphs import DeterministicTxPipeline
 from aurey.reasoning import create_aurey_deep_agent, make_memory_checkpointer
 from aurey.runtime import AureyRuntime
 from aurey.service.app import InvokeResponse, create_fastapi_application
+from aurey.service.bootstrap import AureyServiceBootstrapError
 from aurey.service.state import AureyServiceState
 from aurey.settings import AureySettings
 from tests.fakes.evm_rpc import rpc_factory_from_mapping
@@ -80,6 +81,17 @@ def test_health_endpoint(monkeypatch):
         r = client.get("/health")
     assert r.status_code == 200
     assert r.json() == {"ok": True}
+
+
+def test_health_reports_not_ready_when_bootstrap_fails(monkeypatch):
+    def boom(settings=None):
+        raise AureyServiceBootstrapError("vault")
+
+    monkeypatch.setattr("aurey.service.app.bootstrap_aurey_service_state", boom)
+    with TestClient(create_fastapi_application()) as client:
+        r = client.get("/health")
+    assert r.status_code == 200
+    assert r.json() == {"ok": False}
 
 
 def test_invoke_returns_structured_ok(monkeypatch):

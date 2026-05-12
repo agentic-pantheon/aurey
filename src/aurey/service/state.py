@@ -10,6 +10,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 
 from aurey.reasoning import create_aurey_deep_agent
+from aurey.reasoning.checkpointer import ManagedPostgresCheckpointer
 from aurey.runtime import AureyRuntime
 from aurey.settings import AureySettings
 
@@ -24,6 +25,14 @@ class AureyServiceState:
     default_model: str
     _graphs: dict[str, CompiledStateGraph[Any, Any, Any]] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock)
+    _postgres: ManagedPostgresCheckpointer | None = field(default=None, repr=False)
+
+    def close_checkpointer(self) -> None:
+        """Release Postgres pool/connection manager if this process opened one."""
+
+        if self._postgres is not None:
+            self._postgres.close()
+            self._postgres = None
 
     def get_or_create_graph(self, model: str | None) -> CompiledStateGraph[Any, Any, Any]:
         """Return a compiled deep agent keyed by resolved model identity (bounded cache).

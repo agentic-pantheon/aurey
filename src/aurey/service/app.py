@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.requests import Request
@@ -61,13 +61,18 @@ def create_fastapi_application(
                 app.state.aurey = bootstrap_aurey_service_state(settings)
             except AureyServiceBootstrapError:
                 app.state.aurey = None
-        yield
+        try:
+            yield
+        finally:
+            st = getattr(app.state, "aurey", None)
+            if st is not None:
+                st.close_checkpointer()
 
     app = FastAPI(title="Aurey", lifespan=lifespan)
 
     @app.get("/health")
-    def health() -> dict[str, Literal[True]]:
-        return {"ok": True}
+    def health(request: Request) -> dict[str, bool]:
+        return {"ok": get_aurey_service_state(request) is not None}
 
     @app.post("/v1/invoke", response_model=InvokeResponse)
     def invoke(request: Request, turn: InvokeBody) -> InvokeResponse:
