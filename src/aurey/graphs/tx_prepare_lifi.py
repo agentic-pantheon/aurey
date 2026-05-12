@@ -22,10 +22,10 @@ def _reason_clip(exc: BaseException, max_len: int = 160) -> str:
 
 
 class TxPrepareLiFiInput(BaseModel):
-    """Build from ``swap_prepare`` output: nested ``prepared`` or flat ``route_id`` + tx request."""
+    """Build executable swap wiring from ``swap_prepare``; prefers ``prepared_id`` so calldata stays server-side (1Claw signing after prepare)."""
 
-    chain: str = Field(min_length=1)
-    from_address: str = Field(min_length=1)
+    chain: str = Field(min_length=1, description="Chain slug for the LiFi step.")
+    from_address: str = Field(min_length=1, description="EOA that will send the swap tx (0x).")
     prepared: dict[str, Any] | None = Field(
         default=None,
         description=(

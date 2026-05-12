@@ -158,29 +158,50 @@ def _invalid_prepared_id(prepared_id: str) -> dict[str, Any]:
 
 
 class AlchemyTokenPricesArgs(BaseModel):
-    """Token prices quoted by contract address."""
+    """Alchemy token spot prices; requires ``alchemy_api_secret_path`` in Aurey settings."""
 
-    chain: str = Field(min_length=1)
-    wallet_address: str = Field(min_length=1)
-    token_addresses: list[str] = Field(min_length=1)
+    chain: str = Field(
+        min_length=1,
+        description="Chain slug (e.g. ethereum, base).",
+    )
+    wallet_address: str = Field(
+        min_length=1,
+        description="Wallet address for API context.",
+    )
+    token_addresses: list[str] = Field(
+        min_length=1,
+        description="ERC-20 contract addresses to quote (0x form).",
+    )
 
 
 class AlchemyPortfolioArgs(BaseModel):
-    """Portfolio token holdings for a wallet."""
+    """Alchemy portfolio (tokens-by-wallet); requires ``alchemy_api_secret_path`` in settings."""
 
-    chain: str = Field(min_length=1)
-    wallet_address: str = Field(min_length=1)
+    chain: str = Field(
+        min_length=1,
+        description="Chain slug (e.g. ethereum, base).",
+    )
+    wallet_address: str = Field(
+        min_length=1,
+        description="Wallet to list token balances for.",
+    )
 
 
 class AlchemyTransferHistoryArgs(BaseModel):
-    """Transfers via ``alchemy_getAssetTransfers``."""
+    """Alchemy transfer history via ``alchemy_getAssetTransfers``; requires ``alchemy_api_secret_path``."""
 
-    chain: str = Field(min_length=1)
-    wallet_address: str = Field(min_length=1)
+    chain: str = Field(
+        min_length=1,
+        description="Chain slug (e.g. ethereum, base).",
+    )
+    wallet_address: str = Field(
+        min_length=1,
+        description="Wallet whose inbound/outbound transfers are listed.",
+    )
 
 
 class TxExecuteToolArgs(BaseModel):
-    """Simulate/policy/sign/broadcast for a typed prepare envelope."""
+    """Execute a prepared tx: simulate, policy, sign via 1Claw, broadcast."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -218,12 +239,12 @@ class TxExecuteToolArgs(BaseModel):
 
 
 class TxPrepareNativeArgs(BaseModel):
-    """Public args for native transfer preparation; tool name supplies the kind."""
+    """Prepare native (ETH/Base ETH) transfer; signing uses wallet path from settings."""
 
-    chain: str = Field(min_length=1)
-    from_address: str = Field(min_length=1)
-    to_address: str = Field(min_length=1)
-    value_wei: int = Field(ge=0)
+    chain: str = Field(min_length=1, description="Chain slug (e.g. ethereum, base).")
+    from_address: str = Field(min_length=1, description="Sender EVM address (0x).")
+    to_address: str = Field(min_length=1, description="Recipient EVM address (0x).")
+    value_wei: int = Field(ge=0, description="Native amount in wei.")
 
 
 _ERC20_AMOUNT_FIELD = Field(
@@ -237,56 +258,59 @@ _ERC20_AMOUNT_FIELD = Field(
 
 
 class TxPrepareErc20TransferArgs(BaseModel):
-    """Public args for ERC-20 transfer preparation; tool name supplies the kind."""
+    """Prepare ERC-20 transfer; RPC from Alchemy path if configured."""
 
-    chain: str = Field(min_length=1)
+    chain: str = Field(min_length=1, description="Chain slug.")
     from_address: str = Field(min_length=1)
-    token_address: str = Field(min_length=1)
+    token_address: str = Field(min_length=1, description="ERC-20 contract (0x).")
     to_address: str = Field(min_length=1)
     amount_wei: int = _ERC20_AMOUNT_FIELD
 
 
 class TxPrepareErc20ApprovalArgs(BaseModel):
-    """Public args for ERC-20 approval preparation; tool name supplies the kind."""
+    """Prepare ERC-20 ``approve`` for DEX/spenders (e.g. before LiFi swaps)."""
 
-    chain: str = Field(min_length=1)
+    chain: str = Field(min_length=1, description="Chain slug.")
     from_address: str = Field(min_length=1)
     token_address: str = Field(min_length=1)
-    spender_address: str = Field(min_length=1)
+    spender_address: str = Field(min_length=1, description="Spender contract (e.g. router).")
     amount_wei: int = _ERC20_AMOUNT_FIELD
 
 
 class EvmGetNativeBalanceArgs(BaseModel):
-    """Native gas-token balance via JSON-RPC (chain + wallet)."""
+    """Native balance via JSON-RPC; requires ``alchemy_api_secret_path`` for RPC URL derivation."""
 
-    chain: str = Field(min_length=1)
-    wallet_address: str = Field(min_length=1)
+    chain: str = Field(min_length=1, description="Chain slug (e.g. ethereum, base).")
+    wallet_address: str = Field(min_length=1, description="Address to read balance for.")
 
 
 class ResolveKnownAddressArgs(BaseModel):
-    """Resolve a bundled ticker (e.g. USDC, WETH) to a contract address without RPC."""
+    """Map a known ticker to a contract address (bundled mapping; no Alchemy call)."""
 
-    chain: str = Field(min_length=1)
-    known_ticker: str = Field(min_length=1, description="Ticker key, e.g. usdc, weth.")
+    chain: str = Field(min_length=1, description="Chain slug.")
+    known_ticker: str = Field(
+        min_length=1,
+        description="Ticker key, e.g. usdc, weth.",
+    )
 
 
 class EvmGetErc20BalanceArgs(BaseModel):
-    """ERC-20 balance read (Mercury-parity stub until full token address wiring)."""
+    """ERC-20 ``balanceOf`` via JSON-RPC; requires ``alchemy_api_secret_path`` for RPC."""
 
     chain: str = Field(min_length=1)
     wallet_address: str = Field(min_length=1)
-    token_address: str = Field(min_length=1)
+    token_address: str = Field(min_length=1, description="ERC-20 contract (0x).")
 
 
 class EvmGetErc20DecimalsArgs(BaseModel):
-    """Read token ``decimals()`` via deterministic ``eth_call``."""
+    """Read token ``decimals()``; uses RPC from Alchemy-backed URL when configured."""
 
     chain: str = Field(min_length=1)
     token_address: str = Field(min_length=1)
 
 
 class EvmResolveEnsArgs(BaseModel):
-    """Resolve an ENS name to an Ethereum checksum-normalized hex address."""
+    """Resolve ENS on Ethereum L1; uses RPC from settings-backed resolution path."""
 
     name: str = Field(
         min_length=1,
@@ -311,7 +335,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
 
     @tool(args_schema=EvmGetNativeBalanceArgs)
     def evm_get_native_balance(chain: str, wallet_address: str) -> dict[str, Any]:
-        """Return native token balance (wei hex) for wallet on chain via configured RPC path."""
+        """Native token balance via JSON-RPC; RPC URL is derived from ``alchemy_api_secret_path`` in settings (no raw URLs in chat)."""
         payload = EvmGetNativeBalanceArgs(chain=chain, wallet_address=wallet_address)
         graph_in = ReadGraphInput(
             operation="native_balance",
@@ -322,7 +346,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
 
     @tool(args_schema=ResolveKnownAddressArgs)
     def resolve_known_address(chain: str, known_ticker: str) -> dict[str, Any]:
-        """Resolve ticker to address + name using bundled ``known_addresses.json``."""
+        """Map a bundled ticker (e.g. USDC) to contract metadata; offline ``known_addresses.json`` (does not call Alchemy)."""
         payload = ResolveKnownAddressArgs(chain=chain, known_ticker=known_ticker)
         graph_in = ReadGraphInput(
             operation="known_address",
@@ -337,7 +361,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         wallet_address: str,
         token_address: str,
     ) -> dict[str, Any]:
-        """ERC-20 balance placeholder result (validates wallet and token addresses)."""
+        """ERC-20 ``balanceOf`` via RPC; requires Alchemy-derived RPC when using default wiring (see ``alchemy_api_secret_path`` in settings)."""
         payload = EvmGetErc20BalanceArgs(
             chain=chain,
             wallet_address=wallet_address,
@@ -353,7 +377,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
 
     @tool(args_schema=EvmGetErc20DecimalsArgs)
     def evm_get_erc20_decimals(chain: str, token_address: str) -> dict[str, Any]:
-        """Return ERC-20 decimals from the token contract's decimals() view (eth_call)."""
+        """Read ERC-20 ``decimals()`` over JSON-RPC (Alchemy-derived URL when ``alchemy_api_secret_path`` is set)."""
         payload = EvmGetErc20DecimalsArgs(chain=chain, token_address=token_address)
         graph_in = ReadGraphInput(
             operation="erc20_decimals",
@@ -364,7 +388,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
 
     @tool(args_schema=EvmResolveEnsArgs)
     def evm_resolve_ens(name: str, chain: str = "ethereum") -> dict[str, Any]:
-        """Resolve ENS on **ethereum mainnet** to a ``0x`` address (registry + resolver).
+        """Resolve ENS on Ethereum mainnet to a checksum ``0x`` address (RPC from settings-derived URL).
 
         Call **before** ``tx_prepare_*`` / ``swap_prepare`` when the user gives an ENS name as
         ``to_address`` or recipient; use ``result['resolved_address']``. Other chains reject.
@@ -391,7 +415,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         wallet_address: str,
         token_addresses: list[str],
     ) -> dict[str, Any]:
-        """Fetch quoted prices by token contract address."""
+        """Alchemy Prices API quotes by token address; requires ``alchemy_api_secret_path`` in Aurey settings (vault path, never the raw key)."""
         payload = AlchemyTokenPricesArgs(
             chain=chain,
             wallet_address=wallet_address,
@@ -409,7 +433,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         chain: str,
         wallet_address: str,
     ) -> dict[str, Any]:
-        """Portfolio balances for wallet on chain."""
+        """Alchemy Data API portfolio (tokens-by-wallet); requires ``alchemy_api_secret_path`` in settings."""
         state = alchemy_g.invoke(
             {
                 "input": {
@@ -428,7 +452,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         chain: str,
         wallet_address: str,
     ) -> dict[str, Any]:
-        """Recent external and ERC-20 transfers for wallet via Alchemy."""
+        """Recent ERC-20 and external transfers via Alchemy ``alchemy_getAssetTransfers``; requires ``alchemy_api_secret_path`` in settings."""
         state = alchemy_g.invoke(
             {
                 "input": {
@@ -454,7 +478,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         slippage: float | None = None,
         order: Literal["FASTEST", "CHEAPEST"] | None = None,
     ) -> dict[str, Any]:
-        """LiFi swap quote + next unsigned tx request (`transaction_request`).
+        """LiFi swap quote from ``GET /v1/quote``; optional LiFi key from ``lifi_api_secret_path`` in settings (path only).
 
         Uses LiFi ``GET /v1/quote`` (see https://docs.li.fi/llms.txt). Optional ``slippage`` is
         a decimal fraction (e.g. ``0.005`` = 0.5%%). Optional ``order`` is ``FASTEST`` or
@@ -547,7 +571,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         route_id: str | None = None,
         transaction_request: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Convert ``swap_prepare`` output into a ``tx_execute`` envelope.
+        """Turn LiFi ``swap_prepare`` output into an executable envelope; RPC/signing stays server-side (1Claw, Alchemy-derived RPC).
 
         Prefer ``prepared_id`` from ``swap_prepare``; it keeps large calldata out of the model
         context. Legacy callers may still pass ``prepared`` verbatim or ``route_id`` plus
@@ -609,7 +633,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         to_address: str,
         value_wei: int,
     ) -> dict[str, Any]:
-        """Prepare native gas-token transfer envelope (signing path only, no key material).
+        """Prepare a native transfer envelope; signing never exposes key material—1Claw signs using configured vault paths.
 
         On success (`ok` true), broadcast with `tx_execute(envelope=result['envelope'])` using that
         dict verbatim. If ``to_address`` is an ENS name, call ``evm_resolve_ens`` first on
@@ -633,7 +657,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         to_address: str,
         amount_wei: int,
     ) -> dict[str, Any]:
-        """Prepare ERC-20 transfer envelope.
+        """Prepare ERC-20 transfer envelope; broadcasting signs via 1Claw—do not paste private keys.
 
         `amount_wei` is misleadingly named: use the token's **native decimals** (raw integer),
         not ETH wei. USDC = 6 decimals. On success (`ok` true), call
@@ -660,7 +684,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         spender_address: str,
         amount_wei: int,
     ) -> dict[str, Any]:
-        """Prepare ERC-20 approval envelope.
+        """Prepare ERC-20 ``approve`` envelope; required before some LiFi swaps when ``allowance`` is returned.
 
         `amount_wei` must be raw token units per token decimals (USDC: 6). On success (`ok` true),
         broadcast with `tx_execute(envelope=result['envelope'])` using that dict verbatim.
@@ -682,7 +706,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         prepared_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Run simulate/policy/sign/broadcast for a prepared transaction envelope.
+        """Simulate, enforce policy, sign via 1Claw, and broadcast; never passes private keys through the model.
 
         Prefer ``prepared_id`` from ``swap_prepare`` or ``tx_prepare_lifi_swap`` for LiFi swaps.
         Legacy callers may pass the exact ``result['envelope']`` dict from a successful
@@ -742,7 +766,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
 
     @tool(args_schema=RequestUserInputArgs)
     def request_user_input(questions: list[UserQuestion]) -> dict[str, Any]:
-        """Queue concise follow-ups for missing user/host context (blocking only)."""
+        """Ask the host/UI for clarifying wallet-operation fields only; never solicit secrets or PII unrelated to txs."""
         count = note_user_input_request(questions)
         return {"ok": True, "result": {"status": "needs_user_input", "question_count": count}}
 

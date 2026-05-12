@@ -1,13 +1,15 @@
 {
   "alchemy_get_portfolio_tokens": {
-    "description": "Portfolio token holdings for a wallet.",
+    "description": "Alchemy portfolio (tokens-by-wallet); requires ``alchemy_api_secret_path`` in settings.",
     "properties": {
       "chain": {
+        "description": "Chain slug (e.g. ethereum, base).",
         "minLength": 1,
         "title": "Chain",
         "type": "string"
       },
       "wallet_address": {
+        "description": "Wallet to list token balances for.",
         "minLength": 1,
         "title": "Wallet Address",
         "type": "string"
@@ -21,14 +23,16 @@
     "type": "object"
   },
   "alchemy_get_token_prices": {
-    "description": "Token prices quoted by contract address.",
+    "description": "Alchemy token spot prices; requires ``alchemy_api_secret_path`` in Aurey settings.",
     "properties": {
       "chain": {
+        "description": "Chain slug (e.g. ethereum, base).",
         "minLength": 1,
         "title": "Chain",
         "type": "string"
       },
       "token_addresses": {
+        "description": "ERC-20 contract addresses to quote (0x form).",
         "items": {
           "type": "string"
         },
@@ -37,6 +41,7 @@
         "type": "array"
       },
       "wallet_address": {
+        "description": "Wallet address for API context.",
         "minLength": 1,
         "title": "Wallet Address",
         "type": "string"
@@ -51,14 +56,16 @@
     "type": "object"
   },
   "alchemy_get_transfer_history": {
-    "description": "Transfers via ``alchemy_getAssetTransfers``.",
+    "description": "Alchemy transfer history via ``alchemy_getAssetTransfers``; requires ``alchemy_api_secret_path``.",
     "properties": {
       "chain": {
+        "description": "Chain slug (e.g. ethereum, base).",
         "minLength": 1,
         "title": "Chain",
         "type": "string"
       },
       "wallet_address": {
+        "description": "Wallet whose inbound/outbound transfers are listed.",
         "minLength": 1,
         "title": "Wallet Address",
         "type": "string"
@@ -72,7 +79,7 @@
     "type": "object"
   },
   "evm_get_erc20_balance": {
-    "description": "ERC-20 balance read (Mercury-parity stub until full token address wiring).",
+    "description": "ERC-20 ``balanceOf`` via JSON-RPC; requires ``alchemy_api_secret_path`` for RPC.",
     "properties": {
       "chain": {
         "minLength": 1,
@@ -80,6 +87,7 @@
         "type": "string"
       },
       "token_address": {
+        "description": "ERC-20 contract (0x).",
         "minLength": 1,
         "title": "Token Address",
         "type": "string"
@@ -99,7 +107,7 @@
     "type": "object"
   },
   "evm_get_erc20_decimals": {
-    "description": "Read token ``decimals()`` via deterministic ``eth_call``.",
+    "description": "Read token ``decimals()``; uses RPC from Alchemy-backed URL when configured.",
     "properties": {
       "chain": {
         "minLength": 1,
@@ -120,14 +128,16 @@
     "type": "object"
   },
   "evm_get_native_balance": {
-    "description": "Native gas-token balance via JSON-RPC (chain + wallet).",
+    "description": "Native balance via JSON-RPC; requires ``alchemy_api_secret_path`` for RPC URL derivation.",
     "properties": {
       "chain": {
+        "description": "Chain slug (e.g. ethereum, base).",
         "minLength": 1,
         "title": "Chain",
         "type": "string"
       },
       "wallet_address": {
+        "description": "Address to read balance for.",
         "minLength": 1,
         "title": "Wallet Address",
         "type": "string"
@@ -141,7 +151,7 @@
     "type": "object"
   },
   "evm_resolve_ens": {
-    "description": "Resolve an ENS name to an Ethereum checksum-normalized hex address.",
+    "description": "Resolve ENS on Ethereum L1; uses RPC from settings-backed resolution path.",
     "properties": {
       "chain": {
         "default": "ethereum",
@@ -195,6 +205,7 @@
     },
     "properties": {
       "questions": {
+        "description": "Host-visible follow-up questions for missing wallet-operation fields (never for secrets or unrelated PII).",
         "items": {
           "$ref": "#/$defs/UserQuestion"
         },
@@ -210,9 +221,10 @@
     "type": "object"
   },
   "resolve_known_address": {
-    "description": "Resolve a bundled ticker (e.g. USDC, WETH) to a contract address without RPC.",
+    "description": "Map a known ticker to a contract address (bundled mapping; no Alchemy call).",
     "properties": {
       "chain": {
+        "description": "Chain slug.",
         "minLength": 1,
         "title": "Chain",
         "type": "string"
@@ -232,6 +244,7 @@
     "type": "object"
   },
   "swap_prepare": {
+    "description": "LiFi swap quote (``GET /v1/quote``); optional authenticated LiFi when ``lifi_api_secret_path`` is set in Aurey settings.",
     "properties": {
       "from_address": {
         "minLength": 1,
@@ -251,6 +264,7 @@
         "type": "string"
       },
       "from_chain": {
+        "description": "Source chain slug.",
         "minLength": 1,
         "title": "From Chain",
         "type": "string"
@@ -299,6 +313,7 @@
         "type": "string"
       },
       "to_chain": {
+        "description": "Destination chain slug.",
         "minLength": 1,
         "title": "To Chain",
         "type": "string"
@@ -317,7 +332,7 @@
     "type": "object"
   },
   "tx_execute": {
-    "description": "Simulate/policy/sign/broadcast for a typed prepare envelope.",
+    "description": "Execute a prepared tx: simulate, policy, sign via 1Claw, broadcast.",
     "properties": {
       "envelope": {
         "anyOf": [
@@ -364,7 +379,7 @@
     "type": "object"
   },
   "tx_prepare_erc20_approval": {
-    "description": "Public args for ERC-20 approval preparation; tool name supplies the kind.",
+    "description": "Prepare ERC-20 ``approve`` for DEX/spenders (e.g. before LiFi swaps).",
     "properties": {
       "amount_wei": {
         "description": "Token amount in the contract's smallest units (not necessarily 1e18). Lookup token decimals: USDC on Base/Ethereum uses **6** \u2014 e.g. 0.01 USDC = **10_000**, 1 USDC = **1_000_000**. WETH uses 18. Do not scale USDC by 10**18.",
@@ -373,6 +388,7 @@
         "type": "integer"
       },
       "chain": {
+        "description": "Chain slug.",
         "minLength": 1,
         "title": "Chain",
         "type": "string"
@@ -383,6 +399,7 @@
         "type": "string"
       },
       "spender_address": {
+        "description": "Spender contract (e.g. router).",
         "minLength": 1,
         "title": "Spender Address",
         "type": "string"
@@ -404,7 +421,7 @@
     "type": "object"
   },
   "tx_prepare_erc20_transfer": {
-    "description": "Public args for ERC-20 transfer preparation; tool name supplies the kind.",
+    "description": "Prepare ERC-20 transfer; RPC from Alchemy path if configured.",
     "properties": {
       "amount_wei": {
         "description": "Token amount in the contract's smallest units (not necessarily 1e18). Lookup token decimals: USDC on Base/Ethereum uses **6** \u2014 e.g. 0.01 USDC = **10_000**, 1 USDC = **1_000_000**. WETH uses 18. Do not scale USDC by 10**18.",
@@ -413,6 +430,7 @@
         "type": "integer"
       },
       "chain": {
+        "description": "Chain slug.",
         "minLength": 1,
         "title": "Chain",
         "type": "string"
@@ -428,6 +446,7 @@
         "type": "string"
       },
       "token_address": {
+        "description": "ERC-20 contract (0x).",
         "minLength": 1,
         "title": "Token Address",
         "type": "string"
@@ -444,14 +463,16 @@
     "type": "object"
   },
   "tx_prepare_lifi_swap": {
-    "description": "Build from ``swap_prepare`` output: nested ``prepared`` or flat ``route_id`` + tx request.",
+    "description": "Build executable swap wiring from ``swap_prepare``; prefers ``prepared_id`` so calldata stays server-side (1Claw signing after prepare).",
     "properties": {
       "chain": {
+        "description": "Chain slug for the LiFi step.",
         "minLength": 1,
         "title": "Chain",
         "type": "string"
       },
       "from_address": {
+        "description": "EOA that will send the swap tx (0x).",
         "minLength": 1,
         "title": "From Address",
         "type": "string"
@@ -519,24 +540,28 @@
     "type": "object"
   },
   "tx_prepare_native_transfer": {
-    "description": "Public args for native transfer preparation; tool name supplies the kind.",
+    "description": "Prepare native (ETH/Base ETH) transfer; signing uses wallet path from settings.",
     "properties": {
       "chain": {
+        "description": "Chain slug (e.g. ethereum, base).",
         "minLength": 1,
         "title": "Chain",
         "type": "string"
       },
       "from_address": {
+        "description": "Sender EVM address (0x).",
         "minLength": 1,
         "title": "From Address",
         "type": "string"
       },
       "to_address": {
+        "description": "Recipient EVM address (0x).",
         "minLength": 1,
         "title": "To Address",
         "type": "string"
       },
       "value_wei": {
+        "description": "Native amount in wei.",
         "minimum": 0,
         "title": "Value Wei",
         "type": "integer"

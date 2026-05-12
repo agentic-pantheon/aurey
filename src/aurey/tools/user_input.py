@@ -22,7 +22,13 @@ class UserQuestion(BaseModel):
 
 
 class RequestUserInputArgs(BaseModel):
-    questions: list[UserQuestion] = Field(min_length=1)
+    questions: list[UserQuestion] = Field(
+        min_length=1,
+        description=(
+            "Host-visible follow-up questions for missing wallet-operation fields (never for "
+            "secrets or unrelated PII)."
+        ),
+    )
 
 
 def _bucket() -> list[dict]:

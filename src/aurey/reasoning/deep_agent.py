@@ -9,6 +9,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 
+from aurey.graphs.chains import CHAIN_INDEX
 from aurey.graphs.evm_codec import normalize_evm_address
 from aurey.reasoning.harness import ensure_aurey_wallet_harness, resolve_harness_model_spec
 from aurey.runtime import AureyRuntime
@@ -24,11 +25,17 @@ except ImportError:  # pragma: no cover - exercised via monkeypatch in tests
 
 
 AUREY_DEEP_USER_PROMPT = (
-    "You are Aurey's planner for on-chain and Alchemy-backed reads, swap preparation, and "
-    "transaction execution.\n"
+    "You are Aurey's single-objective agent: secure, private cryptocurrency wallet assistance "
+    "(reads, swaps, prepares, broadcasts). Stay on that mission.\n"
+    "Privacy posture: Your only enduring user identifier here is their public wallet address "
+    "when configured; you do not need their legal name and should not personalize by asking "
+    "for identifying details. Private keys and API secrets never belong in chat: they are held "
+    "outside the model and resolved server-side via 1Claw vault paths only—never ask for "
+    "mnemonics, raw keys, or provider API key strings.\n"
     "Rules:\n"
     "- Call tools with structured arguments only (no opaque JSON blobs).\n"
-    "- Never ask the user to paste private keys or raw RPC URLs; paths are resolved server-side.\n"
+    "- Never ask the user to paste private keys, mnemonics, or raw RPC URLs; vault paths and "
+    "URLs are resolved server-side without secret values in prompts.\n"
     "- Prefer **checksum** ``0x`` token contract addresses in ``swap_prepare`` "
     "(LiFi ``fromToken`` / ``toToken``). If a quote errors or goes stale, call ``swap_prepare`` "
     "again; optionally raise ``slippage`` (decimal, e.g. ``0.01``) or set ``order`` to "
@@ -55,6 +62,53 @@ AUREY_DEEP_USER_PROMPT = (
     "**`tx_prepare_*`**, **`swap_prepare`**, and similar tools.\n"
     "- Use **request_user_input** only when required fields are missing."
 )
+
+
+def runtime_wiring_context_for_deep_agent_prompt(settings: AureySettings) -> str:
+    """Append coarse runtime hints for the planner.
+
+    Vault paths, vault identifiers, bootstrap env-var **names**, and custom API hosts are not
+    included: they are not API keys but they do fingerprint deployments and constrain where
+    secrets live—unsafe to treat as benign for an LLM channel (prompt leakage, injections, overly
+    helpful echoing).
+
+    Signing mode / capability flags remain so the planner knows what tooling can succeed without
+    teaching an attacker precise secret layout or infra URLs.
+    """
+
+    default_oneclaw = "https://api.1claw.xyz"
+    base_custom = settings.oneclaw_base_url.strip() != default_oneclaw
+    lines = [
+        "Runtime wiring (capability hints only — vault IDs, vault paths, API hostnames, "
+        "and credential env-var names stay server-side):",
+        f"- 1Claw: {'reachable at a non-default base URL (not shown)' if base_custom else 'default hosted base URL'}; "
+        f"vault linkage: {'configured' if (settings.oneclaw_vault_id or '').strip() else 'unset'}",
+        "- 1Claw hosted-agent token flow: "
+        + ("configured" if (settings.oneclaw_agent_id or "").strip() else "not configured"),
+        f"- EVM signing mode: {settings.evm_signing_mode}",
+        "- Alchemy-backed reads/RPC via vault secret: "
+        + ("configured" if (settings.alchemy_api_secret_path or "").strip() else "not configured"),
+        "- Authenticated LiFi (vault API key path): "
+        + ("configured" if (settings.lifi_api_secret_path or "").strip() else "not configured"),
+        f"- LiFi ``integrator`` tag: {'set (not shown)' if (settings.lifi_integrator or '').strip() else 'empty'}",
+        "- Telegram bot token (vault-backed): "
+        + ("configured" if (settings.telegram_bot_token_secret_path or "").strip() else "not configured"),
+    ]
+    ws = (settings.wallet_signing_key_secret_path or "").strip()
+    if ws:
+        lines.append("- Wallet signing material (vault-backed): configured path (not shown)")
+    elif settings.evm_signing_requires_wallet_signing_key_secret_path:
+        lines.append("- Wallet signing material: required for vault_key mode but not configured")
+
+    db = (settings.database_url or "").strip()
+    lines.append(
+        "- LangGraph checkpoint persistence: "
+        + ("Postgres configured (credentials not shown)" if db else "not configured / in-memory")
+    )
+    chain_slugs = ", ".join(sorted(CHAIN_INDEX.keys()))
+    lines.append(f"- Supported EVM chain slugs for reads and RPC-backed tools: {chain_slugs}")
+
+    return "\n\n" + "\n".join(lines)
 
 
 def wallet_context_for_deep_agent_prompt(settings: AureySettings) -> str:
@@ -115,6 +169,7 @@ def create_aurey_deep_agent(
     tools = build_aurey_subgraph_tools(runtime)
     user_sys = AUREY_DEEP_USER_PROMPT.strip()
     user_sys += wallet_context_for_deep_agent_prompt(runtime.settings)
+    user_sys += runtime_wiring_context_for_deep_agent_prompt(runtime.settings)
     if extra_system_prompt and extra_system_prompt.strip():
         user_sys = f"{user_sys}\n\n{extra_system_prompt.strip()}"
 
@@ -131,5 +186,6 @@ def create_aurey_deep_agent(
 __all__ = [
     "AUREY_DEEP_USER_PROMPT",
     "create_aurey_deep_agent",
+    "runtime_wiring_context_for_deep_agent_prompt",
     "wallet_context_for_deep_agent_prompt",
 ]

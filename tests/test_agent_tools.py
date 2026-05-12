@@ -572,3 +572,33 @@ def test_wallet_context_for_deep_agent_prompt_invalid(caplog):
     assert any(
         "AUREY_DEEP_AGENT_WALLET_ADDRESS" in r.getMessage() for r in caplog.records
     )
+
+
+def test_runtime_wiring_context_for_deep_agent_prompt_no_identifiers_or_paths():
+    s = AureySettings(
+        oneclaw_base_url="https://api.example.test",
+        oneclaw_vault_id="vault-xyz-do-not-show",
+        oneclaw_agent_id="agent-value-must-not-appear-in-prompt",
+        oneclaw_api_key_secret_source="MY_BOOT_ENV_DO_NOT_SHOW",
+        alchemy_api_secret_path="vault/alchemy/leak-sensitive",
+        lifi_api_secret_path=None,
+        evm_signing_mode="vault_key",
+        wallet_signing_key_secret_path="vault/sign/secret-branch",
+        telegram_bot_token_secret_path="telegram/path",
+        lifi_integrator="test-int-do-not-show",
+        database_url="postgresql://user:SUPER_SECRET@localhost:5432/db",
+    )
+    out = deep_agent_mod.runtime_wiring_context_for_deep_agent_prompt(s)
+    assert out
+    assert "vault_key" in out
+    assert "base" in out and "ethereum" in out
+    assert "non-default base URL" in out
+    assert "vault linkage: configured" in out
+    assert "hosted-agent token flow: configured" in out
+    assert "vault/" not in out
+    assert "MY_BOOT_ENV" not in out
+    assert "test-int" not in out
+    assert "SUPER_SECRET" not in out
+    assert "postgresql://" not in out
+    assert "agent-value-must-not-appear" not in out
+    assert "vault-xyz-do-not-show" not in out

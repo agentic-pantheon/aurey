@@ -18,6 +18,7 @@ __all__ = [
     "ensure_aurey_wallet_harness",
     "make_memory_checkpointer",
     "resolve_harness_model_spec",
+    "runtime_wiring_context_for_deep_agent_prompt",
     "thread_config",
     "wallet_context_for_deep_agent_prompt",
 ]
@@ -38,4 +39,8 @@ def __getattr__(name: str) -> Any:
         from aurey.reasoning.deep_agent import wallet_context_for_deep_agent_prompt
 
         return wallet_context_for_deep_agent_prompt
+    if name == "runtime_wiring_context_for_deep_agent_prompt":
+        from aurey.reasoning.deep_agent import runtime_wiring_context_for_deep_agent_prompt
+
+        return runtime_wiring_context_for_deep_agent_prompt
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

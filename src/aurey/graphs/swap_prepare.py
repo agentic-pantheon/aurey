@@ -35,8 +35,10 @@ _LIFI_HTTP_USER_AGENT = "Aurey/1.0 (LiFi API client; +https://docs.li.fi/)"
 
 
 class SwapPrepareInput(BaseModel):
-    from_chain: str = Field(min_length=1)
-    to_chain: str = Field(min_length=1)
+    """LiFi swap quote (``GET /v1/quote``); optional authenticated LiFi when ``lifi_api_secret_path`` is set in Aurey settings."""
+
+    from_chain: str = Field(min_length=1, description="Source chain slug.")
+    to_chain: str = Field(min_length=1, description="Destination chain slug.")
     from_asset: str = Field(
         min_length=1,
         description="Token contract (0x…) or symbol as accepted by LiFi ``fromToken``.",
