@@ -13,8 +13,23 @@ class ChainInfo:
 
 
 CHAIN_INDEX: dict[str, ChainInfo] = {
-    "ethereum": ChainInfo("ethereum", 1, "eth-mainnet"),
+    "arbitrum": ChainInfo("arbitrum", 42161, "arb-mainnet"),
+    "avalanche": ChainInfo("avalanche", 43114, "avax-mainnet"),
     "base": ChainInfo("base", 8453, "base-mainnet"),
+    "berachain": ChainInfo("berachain", 80094, "berachain-mainnet"),
+    "bsc": ChainInfo("bsc", 56, "bnb-mainnet"),
+    "celo": ChainInfo("celo", 42220, "celo-mainnet"),
+    "ethereum": ChainInfo("ethereum", 1, "eth-mainnet"),
+    "gnosis": ChainInfo("gnosis", 100, "gnosis-mainnet"),
+    "katana": ChainInfo("katana", 747474, "katana-mainnet"),
+    "linea": ChainInfo("linea", 59144, "linea-mainnet"),
+    "mantle": ChainInfo("mantle", 5000, "mantle-mainnet"),
+    "monad": ChainInfo("monad", 143, "monad-mainnet"),
+    "plasma": ChainInfo("plasma", 9745, "plasma-mainnet"),
+    "polygon": ChainInfo("polygon", 137, "polygon-mainnet"),
+    "scroll": ChainInfo("scroll", 534352, "scroll-mainnet"),
+    "sonic": ChainInfo("sonic", 146, "sonic-mainnet"),
+    "unichain": ChainInfo("unichain", 130, "unichain-mainnet"),
 }
 
 
