@@ -9,6 +9,8 @@ from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from aurey.graphs import (
+    EarnGraphInput,
+    LiFiStatusInput,
     SwapPrepareInput,
     TxExecuteInput,
     TxPrepareErc20Approval,
@@ -16,6 +18,8 @@ from aurey.graphs import (
     TxPrepareLiFiInput,
     TxPrepareNative,
     build_alchemy_graph,
+    build_earn_graph,
+    build_lifi_status_graph,
     build_read_graph,
     build_swap_prepare_graph,
     build_tx_execute_graph,
@@ -157,6 +161,210 @@ def _invalid_prepared_id(prepared_id: str) -> dict[str, Any]:
     }
 
 
+def _swap_prepare_with_prepared_storage(
+    runtime: AureyRuntime,
+    swap_g: Any,
+    prepare_lifi_g: Any,
+    payload: SwapPrepareInput,
+    *,
+    log_tool_name: str,
+) -> dict[str, Any]:
+    """Run swap prepare and mirror ``swap_prepare`` server-side LiFi + execute envelope storage."""
+
+    t0 = time.perf_counter()
+    out = _graph_payload(swap_g.invoke({"input": payload.model_dump()}))
+    rid = None
+    if out.get("ok") and isinstance(out.get("result"), dict):
+        prep = out["result"].get("prepared")
+        if isinstance(prep, dict):
+            rid = prep.get("route_id")
+            tx_req = prep.get("transaction_request") or prep.get("transactionRequest")
+            if isinstance(rid, str) and isinstance(tx_req, dict):
+                lifi_prepared_id = runtime.prepared_txs.put(
+                    kind="lifi_prepared",
+                    payload=prep,
+                    summary=_tx_request_summary(tx_req, route_id=rid, prepared_id=""),
+                )
+                prepared_state = prepare_lifi_g.invoke(
+                    {
+                        "input": {
+                            "chain": payload.from_chain,
+                            "from_address": payload.from_address,
+                            "prepared": prep,
+                        }
+                    }
+                )
+                err = prepared_state.get("error")
+                res = prepared_state.get("result")
+                if err is not None or not isinstance(res, dict):
+                    out = {"ok": False, "error": err or {"code": "invalid_input"}}
+                else:
+                    envelope = res.get("envelope")
+                    if isinstance(envelope, dict):
+                        prepared_id = runtime.prepared_txs.put(
+                            kind="execute_envelope",
+                            payload=envelope,
+                            summary=_envelope_summary(envelope),
+                        )
+                        compact = _tx_request_summary(
+                            tx_req,
+                            route_id=rid,
+                            prepared_id=prepared_id,
+                        )
+                        compact["execute_prepared_id"] = prepared_id
+                        compact["lifi_prepared_id"] = lifi_prepared_id
+                        out["result"]["prepared"] = compact
+                        out["result"]["prepared_id"] = prepared_id
+    log_swap_tool(
+        name=log_tool_name,
+        wall_ms=(time.perf_counter() - t0) * 1000,
+        ok=out.get("ok"),
+        route_id=rid,
+        from_chain=payload.from_chain,
+        to_chain=payload.to_chain,
+    )
+    return out
+
+
+def _earn_vault_summary_for_deposit(vault: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "address",
+        "chain",
+        "chain_id",
+        "name",
+        "slug",
+        "network",
+        "protocol",
+        "is_composer_supported",
+        "is_transactional",
+        "is_redeemable",
+    )
+    out: dict[str, Any] = {k: vault[k] for k in keys if k in vault and vault[k] is not None}
+    analytics = vault.get("analytics")
+    if isinstance(analytics, dict):
+        apy = analytics.get("apy")
+        if isinstance(apy, dict) and apy.get("total") is not None:
+            out["apy_total"] = apy.get("total")
+        if analytics.get("tvl_usd") is not None:
+            out["tvl_usd"] = analytics.get("tvl_usd")
+    return out
+
+
+def _earn_deposit_vault_eligible(vault: dict[str, Any]) -> tuple[bool, str | None]:
+    """Reject Composer deposits when the Earn vault metadata forbids or implies no Composer path."""
+
+    comp = vault.get("is_composer_supported")
+    if comp is False:
+        return False, "Vault is not Composer-supported (is_composer_supported is false)."
+    transactional = vault.get("is_transactional")
+    if comp is None and transactional is False:
+        return (
+            False,
+            "is_composer_supported is absent and is_transactional is false; Composer deposit is unavailable.",
+        )
+    return True, None
+
+
+class EarnListChainsArgs(BaseModel):
+    """Discover LiFi Earn-supported chains (vault discovery); optional LiFi key via ``lifi_api_secret_path``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class EarnListProtocolsArgs(BaseModel):
+    """List yield protocols exposed by LiFi Earn; use before filtering vaults."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class EarnListVaultsArgs(BaseModel):
+    """Paginated vault search on Earn (`https://earn.li.fi`); filter to Composer-capable vaults by default."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chain: str | None = Field(default=None, description="Chain slug (e.g. base, ethereum); optional global filter.")
+    chain_id: int | None = Field(default=None, ge=1, description="EVM chain id; optional alternative to ``chain``.")
+    asset: str | None = Field(
+        default=None,
+        description="Underlying asset filter: token address (0x) or symbol as accepted by Earn.",
+    )
+    protocol: str | None = Field(default=None, description="Protocol id from ``earn_list_protocols``.")
+    min_tvl_usd: float | None = Field(default=None, ge=0.0, description="Minimum vault TVL in USD.")
+    is_transactional: bool | None = Field(default=None, description="Restrict to vaults that allow on-chain deposits.")
+    is_redeemable: bool | None = Field(default=None, description="Restrict to redeemable vaults.")
+    is_composer_supported: bool = Field(
+        default=True,
+        description="When true (default), only vaults that support LiFi Composer routes are returned.",
+    )
+    sort_by: Literal["apy", "tvl"] | None = Field(default=None, description="Server-side sort key.")
+    limit: int = Field(default=10, ge=1, le=100, description="Page size (max 100).")
+    cursor: str | None = Field(default=None, min_length=1, description="Opaque pagination cursor from prior response.")
+
+
+class EarnGetVaultArgs(BaseModel):
+    """Fetch one Earn vault by chain + contract; use before ``earn_prepare_deposit`` to validate metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chain: str | None = Field(default=None, min_length=1, description="Chain slug for the vault.")
+    chain_id: int | None = Field(default=None, ge=1, description="Numeric chain id for the vault.")
+    vault_address: str = Field(min_length=1, description="Vault (vault share) contract address (0x).")
+
+    @model_validator(mode="after")
+    def _chain_ref(self) -> Self:
+        if (self.chain is None or not str(self.chain).strip()) and self.chain_id is None:
+            raise ValueError("Provide chain or chain_id for earn_get_vault.")
+        return self
+
+
+class EarnPortfolioPositionsArgs(BaseModel):
+    """LiFi Earn portfolio positions for a wallet across supported chains."""
+
+    wallet_address: str = Field(min_length=1, description="Wallet to list Earn positions for (0x).")
+
+
+class EarnPrepareDepositArgs(BaseModel):
+    """Prepare a LiFi Composer quote that deposits into an Earn vault (``toToken`` = vault share token)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    vault_chain: str | None = Field(default=None, min_length=1, description="Chain slug where the vault lives.")
+    vault_chain_id: int | None = Field(default=None, ge=1, description="Numeric chain id of the vault.")
+    vault_address: str = Field(min_length=1, description="Vault contract on the vault chain (0x).")
+    from_chain: str = Field(min_length=1, description="Source chain slug where ``from_asset`` is spent.")
+    from_asset: str = Field(
+        min_length=1,
+        description="Sell token on ``from_chain`` (0x address or symbol accepted by LiFi ``fromToken``).",
+    )
+    from_amount_wei: str = Field(
+        min_length=1,
+        pattern=r"^[0-9]+$",
+        description="Sell amount in smallest token units (decimal string of digits, same as ``swap_prepare``).",
+    )
+    from_address: str = Field(min_length=1, description="Sender; must sign the prepared tx on ``from_chain``.")
+    to_address: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Recipient of vault shares on the vault chain; defaults to ``from_address``.",
+    )
+    slippage: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Max slippage as decimal fraction (e.g. 0.005 = 0.5%%).",
+    )
+    order: Literal["FASTEST", "CHEAPEST"] | None = Field(
+        default=None,
+        description="LiFi route preference for the Composer deposit leg.",
+    )
+
+    @model_validator(mode="after")
+    def _vault_chain_ref(self) -> Self:
+        if (self.vault_chain is None or not str(self.vault_chain).strip()) and self.vault_chain_id is None:
+            raise ValueError("Provide vault_chain or vault_chain_id to resolve the vault.")
+        return self
+
+
 class AlchemyTokenPricesArgs(BaseModel):
     """Alchemy token spot prices; requires ``alchemy_api_secret_path`` in Aurey settings."""
 
@@ -217,7 +425,7 @@ class TxExecuteToolArgs(BaseModel):
         default=None,
         description=(
             "Preferred for LiFi swaps: short server-side prepared transaction id returned by "
-            "`swap_prepare` or `tx_prepare_lifi_swap`. Avoids sending large calldata through the "
+            "`swap_prepare`, `earn_prepare_deposit`, or `tx_prepare_lifi_swap`. Avoids sending large calldata through the "
             "model."
         ),
     )
@@ -324,10 +532,18 @@ class EvmResolveEnsArgs(BaseModel):
 
 
 def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
-    """Compile subgraphs once and expose strict LangChain tools (validated graph inputs only)."""
+    """Compile subgraphs once and expose strict LangChain tools (validated graph inputs only).
+
+    Includes LiFi **Earn** discovery (chains, protocols, vaults, portfolio) and **Composer**
+    vault deposits via ``earn_prepare_deposit``, which reuses the same ``prepared_id`` storage as
+    ``swap_prepare``. Cross-chain deposits should poll ``lifi_get_status`` until the bridge
+    completes.
+    """
 
     read_g = build_read_graph(runtime)
     alchemy_g = build_alchemy_graph(runtime)
+    earn_g = build_earn_graph(runtime)
+    lifi_status_g = build_lifi_status_graph(runtime)
     swap_g = build_swap_prepare_graph(runtime)
     prepare_g = build_tx_prepare_graph(runtime)
     prepare_lifi_g = build_tx_prepare_lifi_graph(runtime)
@@ -466,6 +682,118 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
 
     tools.append(alchemy_get_transfer_history)
 
+    @tool(args_schema=EarnListChainsArgs)
+    def earn_list_chains() -> dict[str, Any]:
+        """List chains supported by LiFi Earn — start here for vault discovery.
+
+        Results are trimmed server-side. Use ``earn_list_vaults`` / ``earn_get_vault`` for Composer
+        deposit metadata (``is_composer_supported``).
+        """
+        graph_in = EarnGraphInput(operation="list_chains")
+        return _graph_payload(
+            earn_g.invoke({"input": graph_in.model_dump(mode="json", exclude_none=True)})
+        )
+
+    tools.append(earn_list_chains)
+
+    @tool(args_schema=EarnListProtocolsArgs)
+    def earn_list_protocols() -> dict[str, Any]:
+        """List yield protocol ids/names from LiFi Earn; use ``protocol`` when filtering ``earn_list_vaults``."""
+        graph_in = EarnGraphInput(operation="list_protocols")
+        return _graph_payload(
+            earn_g.invoke({"input": graph_in.model_dump(mode="json", exclude_none=True)})
+        )
+
+    tools.append(earn_list_protocols)
+
+    @tool(args_schema=EarnListVaultsArgs)
+    def earn_list_vaults(
+        chain: str | None = None,
+        chain_id: int | None = None,
+        asset: str | None = None,
+        protocol: str | None = None,
+        min_tvl_usd: float | None = None,
+        is_transactional: bool | None = None,
+        is_redeemable: bool | None = None,
+        is_composer_supported: bool = True,
+        sort_by: Literal["apy", "tvl"] | None = None,
+        limit: int = 10,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """Search Earn vaults; default filter favors **Composer-supported** vaults (LiFi vault-as-``toToken`` deposits).
+
+        Prefer vaults with ``is_composer_supported`` true for ``earn_prepare_deposit``. Pagination:
+        pass ``next_cursor`` from a prior ``result`` when present.
+        """
+        args = EarnListVaultsArgs(
+            chain=chain,
+            chain_id=chain_id,
+            asset=asset,
+            protocol=protocol,
+            min_tvl_usd=min_tvl_usd,
+            is_transactional=is_transactional,
+            is_redeemable=is_redeemable,
+            is_composer_supported=is_composer_supported,
+            sort_by=sort_by,
+            limit=limit,
+            cursor=cursor,
+        )
+        graph_in = EarnGraphInput(
+            operation="list_vaults",
+            chain=args.chain,
+            chain_id=args.chain_id,
+            asset=args.asset,
+            protocol=args.protocol,
+            min_tvl_usd=args.min_tvl_usd,
+            is_transactional=args.is_transactional,
+            is_redeemable=args.is_redeemable,
+            is_composer_supported=args.is_composer_supported,
+            sort_by=args.sort_by,
+            limit=args.limit,
+            cursor=args.cursor,
+        )
+        return _graph_payload(
+            earn_g.invoke({"input": graph_in.model_dump(mode="json", exclude_none=True)})
+        )
+
+    tools.append(earn_list_vaults)
+
+    @tool(args_schema=EarnGetVaultArgs)
+    def earn_get_vault(
+        vault_address: str,
+        chain: str | None = None,
+        chain_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Load one Earn vault record; inspect ``is_composer_supported`` before preparing a Composer deposit.
+
+        ``earn_prepare_deposit`` re-validates this server-side and rejects unsupported vaults.
+        """
+        args = EarnGetVaultArgs(chain=chain, chain_id=chain_id, vault_address=vault_address)
+        graph_in = EarnGraphInput(
+            operation="get_vault",
+            chain=args.chain,
+            chain_id=args.chain_id,
+            vault_address=args.vault_address,
+        )
+        return _graph_payload(
+            earn_g.invoke({"input": graph_in.model_dump(mode="json", exclude_none=True)})
+        )
+
+    tools.append(earn_get_vault)
+
+    @tool(args_schema=EarnPortfolioPositionsArgs)
+    def earn_portfolio_positions(wallet_address: str) -> dict[str, Any]:
+        """List a wallet's Earn positions (vault balances) aggregated by LiFi Earn."""
+        graph_in = EarnGraphInput(
+            operation="portfolio_positions",
+            wallet_address=wallet_address,
+        )
+        return _graph_payload(
+            earn_g.invoke({"input": graph_in.model_dump(mode="json", exclude_none=True)})
+        )
+
+    tools.append(earn_portfolio_positions)
+
     @tool(args_schema=SwapPrepareInput)
     def swap_prepare(
         from_chain: str,
@@ -494,6 +822,13 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
 
         If ``to_address`` (or ``from_address``) is an ENS name like ``alice.eth``, run
         ``evm_resolve_ens`` on **ethereum** first and pass the returned hex address here.
+
+        **Earn / Composer:** tokens swaps are the same API shape as vault deposits prepared via
+        ``earn_prepare_deposit`` (vault share address as ``toToken``). When ``from_chain`` differs
+        from the vault chain, treat the route as **bridging**: after execution, poll LiFi status with
+        ``lifi_get_status`` using the source-chain broadcast hash until the destination leg is done.
+        Quotes **expire**; if ``tx_execute`` fails validation or allowance changed, call
+        ``swap_prepare`` (or ``earn_prepare_deposit``) again before re-approving or executing.
         """
         payload = SwapPrepareInput(
             from_chain=from_chain,
@@ -506,61 +841,167 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
             slippage=slippage,
             order=order,
         )
-        t0 = time.perf_counter()
-        out = _graph_payload(swap_g.invoke({"input": payload.model_dump()}))
-        rid = None
-        if out.get("ok") and isinstance(out.get("result"), dict):
-            prep = out["result"].get("prepared")
-            if isinstance(prep, dict):
-                rid = prep.get("route_id")
-                tx_req = prep.get("transaction_request") or prep.get("transactionRequest")
-                if isinstance(rid, str) and isinstance(tx_req, dict):
-                    lifi_prepared_id = runtime.prepared_txs.put(
-                        kind="lifi_prepared",
-                        payload=prep,
-                        summary=_tx_request_summary(tx_req, route_id=rid, prepared_id=""),
-                    )
-                    prepared_state = prepare_lifi_g.invoke(
-                        {
-                            "input": {
-                                "chain": from_chain,
-                                "from_address": from_address,
-                                "prepared": prep,
-                            }
-                        }
-                    )
-                    err = prepared_state.get("error")
-                    res = prepared_state.get("result")
-                    if err is not None or not isinstance(res, dict):
-                        out = {"ok": False, "error": err or {"code": "invalid_input"}}
-                    else:
-                        envelope = res.get("envelope")
-                        if isinstance(envelope, dict):
-                            prepared_id = runtime.prepared_txs.put(
-                                kind="execute_envelope",
-                                payload=envelope,
-                                summary=_envelope_summary(envelope),
-                            )
-                            compact = _tx_request_summary(
-                                tx_req,
-                                route_id=rid,
-                                prepared_id=prepared_id,
-                            )
-                            compact["execute_prepared_id"] = prepared_id
-                            compact["lifi_prepared_id"] = lifi_prepared_id
-                            out["result"]["prepared"] = compact
-                            out["result"]["prepared_id"] = prepared_id
-        log_swap_tool(
-            name="swap_prepare",
-            wall_ms=(time.perf_counter() - t0) * 1000,
-            ok=out.get("ok"),
-            route_id=rid,
-            from_chain=from_chain,
-            to_chain=to_chain,
+        return _swap_prepare_with_prepared_storage(
+            runtime,
+            swap_g,
+            prepare_lifi_g,
+            payload,
+            log_tool_name="swap_prepare",
         )
-        return out
 
     tools.append(swap_prepare)
+
+    @tool(args_schema=EarnPrepareDepositArgs)
+    def earn_prepare_deposit(
+        vault_address: str,
+        from_chain: str,
+        from_asset: str,
+        from_amount_wei: str,
+        from_address: str,
+        vault_chain: str | None = None,
+        vault_chain_id: int | None = None,
+        to_address: str | None = None,
+        slippage: float | None = None,
+        order: Literal["FASTEST", "CHEAPEST"] | None = None,
+    ) -> dict[str, Any]:
+        """Prepare a **LiFi Composer deposit**: quotes a route whose ``toToken`` is the **vault share** token.
+
+        Flow: (1) fetch/validate the vault via Earn (``is_composer_supported`` / ``is_transactional`` rules),
+        (2) call LiFi ``/v1/quote`` with ``to_asset`` = vault address and ``to_chain`` = vault chain — same
+        machinery as ``swap_prepare``. (3) Output includes ``prepared_id`` and compact ``prepared`` summary;
+        execute with ``tx_execute(prepared_id=...)`` only — **no broadcast or approve** here.
+
+        If ``result`` includes ``allowance``, approve the indicated spender with ``tx_prepare_erc20_approval``
+        then ``tx_execute`` that tx before executing the deposit. Re-quote with this tool if the quote expires.
+
+        **Cross-chain:** when ``from_chain`` differs from the vault chain, ``requires_status_polling`` is true:
+        after the first on-chain tx, use ``lifi_get_status`` with the **source** tx hash and chain hints until
+        LiFi reports completion (destination funds or substatus).
+
+        ENS names on **ethereum** must be resolved with ``evm_resolve_ens`` before passing addresses.
+        """
+        payload = EarnPrepareDepositArgs(
+            vault_chain=vault_chain,
+            vault_chain_id=vault_chain_id,
+            vault_address=vault_address,
+            from_chain=from_chain,
+            from_asset=from_asset,
+            from_amount_wei=from_amount_wei,
+            from_address=from_address,
+            to_address=to_address,
+            slippage=slippage,
+            order=order,
+        )
+        vault_in = EarnGraphInput(
+            operation="get_vault",
+            chain=payload.vault_chain,
+            chain_id=payload.vault_chain_id,
+            vault_address=payload.vault_address,
+        )
+        vstate = earn_g.invoke({"input": vault_in.model_dump(mode="json", exclude_none=True)})
+        if vstate.get("error"):
+            return {"ok": False, "error": vstate["error"]}
+        vres = vstate.get("result")
+        if not isinstance(vres, dict):
+            return {
+                "ok": False,
+                "error": {
+                    "code": "http_error",
+                    "message": "Unexpected earn get_vault result shape.",
+                },
+            }
+        vault = vres.get("vault")
+        if not isinstance(vault, dict):
+            return {
+                "ok": False,
+                "error": {
+                    "code": "http_error",
+                    "message": "Unexpected earn get_vault payload.",
+                },
+            }
+        ok_dep, dep_msg = _earn_deposit_vault_eligible(vault)
+        if not ok_dep:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "invalid_input",
+                    "message": dep_msg,
+                    "details": {"vault_address": vault.get("address")},
+                },
+            }
+
+        to_chain = vault.get("chain")
+        if not to_chain and vault.get("chain_id") is not None:
+            to_chain = chain_name_for_id(int(vault["chain_id"]))
+        if not to_chain or not str(to_chain).strip():
+            return {
+                "ok": False,
+                "error": {
+                    "code": "invalid_input",
+                    "message": "Could not resolve vault chain slug from Earn vault details.",
+                    "details": {"chain_id": vault.get("chain_id")},
+                },
+            }
+
+        to_eff = payload.to_address or payload.from_address
+        v_addr = vault.get("address") or payload.vault_address
+        swap_payload = SwapPrepareInput(
+            from_chain=payload.from_chain,
+            to_chain=str(to_chain).strip(),
+            from_asset=payload.from_asset,
+            to_asset=str(v_addr),
+            from_amount_wei=payload.from_amount_wei,
+            from_address=payload.from_address,
+            to_address=to_eff,
+            slippage=payload.slippage,
+            order=payload.order,
+        )
+        out = _swap_prepare_with_prepared_storage(
+            runtime,
+            swap_g,
+            prepare_lifi_g,
+            swap_payload,
+            log_tool_name="earn_prepare_deposit",
+        )
+        if out.get("ok") and isinstance(out.get("result"), dict):
+            from_slug = payload.from_chain.strip().lower()
+            dest_slug = str(to_chain).strip().lower()
+            out["result"]["earn_deposit"] = {
+                "vault": _earn_vault_summary_for_deposit(vault),
+                "requires_status_polling": from_slug != dest_slug,
+            }
+        return out
+
+    tools.append(earn_prepare_deposit)
+
+    @tool(args_schema=LiFiStatusInput)
+    def lifi_get_status(
+        tx_hash: str,
+        from_chain: str | None = None,
+        to_chain: str | None = None,
+        from_chain_id: int | None = None,
+        to_chain_id: int | None = None,
+        bridge: str | None = None,
+    ) -> dict[str, Any]:
+        """Poll **LiFi** ``GET /v1/status`` for bridging / Composer transfers.
+
+        Use after ``swap_prepare`` or ``earn_prepare_deposit`` when **source and destination chains
+        differ**: pass the tx hash from the *sending* chain (or LiFi step id), and optional
+        ``from_chain`` / ``to_chain`` (or ids) plus ``bridge`` to disambiguate stuck routes.
+        """
+        st = LiFiStatusInput(
+            tx_hash=tx_hash,
+            from_chain=from_chain,
+            to_chain=to_chain,
+            from_chain_id=from_chain_id,
+            to_chain_id=to_chain_id,
+            bridge=bridge,
+        )
+        return _graph_payload(
+            lifi_status_g.invoke({"input": st.model_dump(mode="json", exclude_none=True)})
+        )
+
+    tools.append(lifi_get_status)
 
     @tool(args_schema=TxPrepareLiFiInput)
     def tx_prepare_lifi_swap(
@@ -573,7 +1014,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
     ) -> dict[str, Any]:
         """Turn LiFi ``swap_prepare`` output into an executable envelope; RPC/signing stays server-side (1Claw, Alchemy-derived RPC).
 
-        Prefer ``prepared_id`` from ``swap_prepare``; it keeps large calldata out of the model
+        Prefer ``prepared_id`` from ``swap_prepare`` or ``earn_prepare_deposit``; it keeps large calldata out of the model
         context. Legacy callers may still pass ``prepared`` verbatim or ``route_id`` plus
         ``transaction_request``. On success, call ``tx_execute(prepared_id=result['prepared_id'])``.
         Resolve ENS names on ethereum with ``evm_resolve_ens`` before supplying ``from_address``.
@@ -708,7 +1149,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
     ) -> dict[str, Any]:
         """Simulate, enforce policy, sign via 1Claw, and broadcast; never passes private keys through the model.
 
-        Prefer ``prepared_id`` from ``swap_prepare`` or ``tx_prepare_lifi_swap`` for LiFi swaps.
+        Prefer ``prepared_id`` from ``swap_prepare``, ``earn_prepare_deposit``, or ``tx_prepare_lifi_swap`` for LiFi swaps.
         Legacy callers may pass the exact ``result['envelope']`` dict from a successful
         ``tx_prepare_*`` tool. If you mistakenly pass ``swap_prepare``'s legacy ``prepared`` object
         (``route_id`` + ``transaction_request`` only), this tool attempts to repair it.
@@ -779,6 +1220,12 @@ __all__ = [
     "AlchemyPortfolioArgs",
     "AlchemyTokenPricesArgs",
     "AlchemyTransferHistoryArgs",
+    "EarnGetVaultArgs",
+    "EarnListChainsArgs",
+    "EarnListProtocolsArgs",
+    "EarnListVaultsArgs",
+    "EarnPortfolioPositionsArgs",
+    "EarnPrepareDepositArgs",
     "EvmGetErc20BalanceArgs",
     "EvmGetNativeBalanceArgs",
     "EvmResolveEnsArgs",
