@@ -1,4 +1,9 @@
 # Aurey
+> **Production-grade EVM agentic wallet. Powered by LangGraph and 1Claw.**
+<p align="center">
+  <img src="asset/1.png" alt="Aurey — EVM agentic wallet secured with 1Claw" />
+</p>
+
 
 ### **Production-grade EVM agentic wallet. LangGraph brains. Secrets that never sleep in `.env`.**
 
