@@ -23,6 +23,10 @@ def lifi_transaction_request_to_envelope(
     """Normalize an ethers-style tx request from LiFi into our execute envelope.
 
     ``from`` / ``chainId`` fields on the LiFi payload, when present, must match expectations.
+
+    For ``vault_key``, ``signing_key_secret_path`` is required downstream. For ``oneclaw_intents``,
+    leave it unset to use 1Claw agent defaults, or set it to the same vault path as
+    ``AUREY_WALLET_SIGNING_KEY_SECRET_PATH`` so 1Claw receives an explicit ``signing_key_path``.
     """
 
     tr = transaction_request
@@ -77,7 +81,13 @@ def lifi_transaction_request_to_envelope(
     if tr.get("nonce") is not None:
         nonce = int(parse_evm_uint(tr["nonce"]))
 
-    secret_path = signing_key_secret_path if signing_mode == "vault_key" else None
+    if signing_mode == "vault_key":
+        secret_path = signing_key_secret_path
+    else:
+        # Hosted-agent / 1Claw signing: omit path to use agent defaults, or pass a non-empty path as
+        # 1Claw ``signing_key_path`` override (same env as ``wallet_signing_key_secret_path``).
+        o = (signing_key_secret_path or "").strip()
+        secret_path = o or None
 
     return PreparedTxEnvelope(
         kind="lifi_swap",

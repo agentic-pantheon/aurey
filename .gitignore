@@ -42,3 +42,7 @@ coverage.xml
 .DS_Store
 *.swp
 *.swo
+
+# LiFi Composer eval: ignore tee’d logs; harness stays tracked
+eval/composer-li-fi/runs/**
+!eval/composer-li-fi/runs/.gitignore

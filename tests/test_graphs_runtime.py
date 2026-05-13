@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import ormsgpack
 
@@ -26,6 +26,7 @@ from aurey.graphs.ens_eth import (
     ens_namehash,
     ens_resolver_calldata,
 )
+from aurey.graphs.evm_codec import to_checksum_evm_address
 from aurey.graphs.ports import HttpJsonPort, HttpJsonRequestError
 from aurey.runtime import AureyRuntime
 from aurey.settings import AureySettings
@@ -1414,7 +1415,7 @@ def test_earn_get_vault_graph_normalizes_address_and_null_apy_caps():
     secrets: dict[str, str] = {}
     settings = AureySettings()
     vault_addr_mixed = "0xAbCdEf1234567890AbCdEf1234567890aBcDef12"
-    vault_addr_norm = "0xabcdef1234567890abcdef1234567890abcdef12"
+    vault_addr_cs = to_checksum_evm_address(vault_addr_mixed)
     matched_urls: list[str] = []
 
     def match_detail(**kw: object) -> bool:
@@ -1422,7 +1423,7 @@ def test_earn_get_vault_graph_normalizes_address_and_null_apy_caps():
         if not (kw.get("method") == "GET" and "earn.li.fi/v1/vaults/8453/" in u):
             return False
         matched_urls.append(u)
-        return u.rstrip("/").endswith(vault_addr_norm)
+        return u.rstrip("/").endswith(vault_addr_cs)
 
     raw_vault = {
         "address": vault_addr_mixed,

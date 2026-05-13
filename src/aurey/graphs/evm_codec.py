@@ -1,6 +1,8 @@
-"""Minimal ABI encoding helpers (no web3 dependency)."""
+"""Minimal ABI encoding helpers (light web3 use for EIP-55)."""
 
 from __future__ import annotations
+
+from web3 import Web3
 
 
 def normalize_evm_address(addr: str) -> str:
@@ -12,6 +14,12 @@ def normalize_evm_address(addr: str) -> str:
     if len(body) != 40:
         raise ValueError("EVM address must be 20 bytes hex.")
     return "0x" + body
+
+
+def to_checksum_evm_address(addr: str) -> str:
+    """Return EIP-55 checksummed ``0x`` address (LiFi Earn vault detail path expects this shape)."""
+
+    return Web3.to_checksum_address(normalize_evm_address(addr))
 
 
 def _strip_0x(h: str) -> str:
@@ -68,6 +76,8 @@ def normalize_contract_calldata(data: str | None) -> str:
     if not s.startswith("0x"):
         s = "0x" + s
     body = s[2:]
+    # Models and log transports sometimes inject whitespace/newlines inside long hex.
+    body = "".join(body.split())
     if not body:
         return "0x"
     for c in body:

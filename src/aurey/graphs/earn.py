@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from aurey.custody.errors import SecretNotFoundError, SecretStoreUnavailableError
 from aurey.graphs.chains import chain_id_for, chain_name_for_id
-from aurey.graphs.evm_codec import normalize_evm_address
+from aurey.graphs.evm_codec import normalize_evm_address, to_checksum_evm_address
 from aurey.graphs.ports import HttpJsonRequestError
 from aurey.graphs.results import (
     EarnChainResult,
@@ -528,7 +528,7 @@ def _execute_node(runtime: AureyRuntime, state: EarnGraphState) -> EarnGraphStat
                     ).model_dump()
                 }
             v_addr = normalize_evm_address(str(parsed.vault_address))
-            path_addr = quote(v_addr, safe="")
+            path_addr = quote(to_checksum_evm_address(v_addr), safe="")
             raw = runtime.http.request_json(
                 method="GET",
                 url=f"{base}/v1/vaults/{cid}/{path_addr}",

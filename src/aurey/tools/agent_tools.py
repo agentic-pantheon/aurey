@@ -150,6 +150,27 @@ def _envelope_summary(
     return out
 
 
+def _attach_execute_prepared_id(runtime: AureyRuntime, out: dict[str, Any]) -> dict[str, Any]:
+    """Store full execute envelopes server-side so ``tx_execute`` can use ``prepared_id`` (no calldata round-trip)."""
+
+    if not out.get("ok") or not isinstance(out.get("result"), dict):
+        return out
+    envelope = out["result"].get("envelope")
+    if not isinstance(envelope, dict):
+        return out
+    stored_id = runtime.prepared_txs.put(
+        kind="execute_envelope",
+        payload=dict(envelope),
+        summary=_envelope_summary(envelope),
+    )
+    out["result"] = {
+        **out["result"],
+        "prepared_id": stored_id,
+        "envelope": _envelope_summary(envelope, prepared_id=stored_id),
+    }
+    return out
+
+
 def _invalid_prepared_id(prepared_id: str) -> dict[str, Any]:
     return {
         "ok": False,
@@ -1076,9 +1097,9 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
     ) -> dict[str, Any]:
         """Prepare a native transfer envelope; signing never exposes key material—1Claw signs using configured vault paths.
 
-        On success (`ok` true), broadcast with `tx_execute(envelope=result['envelope'])` using that
-        dict verbatim. If ``to_address`` is an ENS name, call ``evm_resolve_ens`` first on
-        ethereum and use ``resolved_address`` as ``to_address``.
+        On success (`ok` true), broadcast with ``tx_execute(prepared_id=result['prepared_id'])`` (preferred)
+        or ``tx_execute(envelope=...)`` using the returned summary plus ``prepared_id``. If ``to_address`` is an ENS name,
+        call ``evm_resolve_ens`` first on ethereum and use ``resolved_address`` as ``to_address``.
         """
         payload = TxPrepareNative(
             chain=chain,
@@ -1086,7 +1107,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
             to_address=to_address,
             value_wei=value_wei,
         )
-        return _graph_payload(prepare_g.invoke({"input": payload.model_dump()}))
+        return _attach_execute_prepared_id(runtime, _graph_payload(prepare_g.invoke({"input": payload.model_dump()})))
 
     tools.append(tx_prepare_native_transfer)
 
@@ -1102,8 +1123,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
 
         `amount_wei` is misleadingly named: use the token's **native decimals** (raw integer),
         not ETH wei. USDC = 6 decimals. On success (`ok` true), call
-        `tx_execute(envelope=result['envelope'])` with the returned envelope unchanged.
-        Never call `tx_execute` without `envelope`. Resolve ENS recipients with
+        ``tx_execute(prepared_id=result['prepared_id'])`` (preferred). Resolve ENS recipients with
         ``evm_resolve_ens`` (ethereum) before passing ``to_address``.
         """
         payload = TxPrepareErc20Transfer(
@@ -1113,7 +1133,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
             to_address=to_address,
             amount_wei=amount_wei,
         )
-        return _graph_payload(prepare_g.invoke({"input": payload.model_dump()}))
+        return _attach_execute_prepared_id(runtime, _graph_payload(prepare_g.invoke({"input": payload.model_dump()})))
 
     tools.append(tx_prepare_erc20_transfer)
 
@@ -1128,7 +1148,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         """Prepare ERC-20 ``approve`` envelope; required before some LiFi swaps when ``allowance`` is returned.
 
         `amount_wei` must be raw token units per token decimals (USDC: 6). On success (`ok` true),
-        broadcast with `tx_execute(envelope=result['envelope'])` using that dict verbatim.
+        broadcast with ``tx_execute(prepared_id=result['prepared_id'])`` (preferred) so calldata is not copied through the model.
         """
         payload = TxPrepareErc20Approval(
             chain=chain,
@@ -1137,7 +1157,7 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
             spender_address=spender_address,
             amount_wei=amount_wei,
         )
-        return _graph_payload(prepare_g.invoke({"input": payload.model_dump()}))
+        return _attach_execute_prepared_id(runtime, _graph_payload(prepare_g.invoke({"input": payload.model_dump()})))
 
     tools.append(tx_prepare_erc20_approval)
 
@@ -1149,9 +1169,10 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
     ) -> dict[str, Any]:
         """Simulate, enforce policy, sign via 1Claw, and broadcast; never passes private keys through the model.
 
-        Prefer ``prepared_id`` from ``swap_prepare``, ``earn_prepare_deposit``, or ``tx_prepare_lifi_swap`` for LiFi swaps.
-        Legacy callers may pass the exact ``result['envelope']`` dict from a successful
-        ``tx_prepare_*`` tool. If you mistakenly pass ``swap_prepare``'s legacy ``prepared`` object
+        Prefer ``prepared_id`` from any prepare step: ``swap_prepare``, ``earn_prepare_deposit``,
+        ``tx_prepare_lifi_swap``, or **``tx_prepare_native_transfer`` / ``tx_prepare_erc20_*``**
+        (avoids corrupting long ``data`` hex when the model copies an envelope). Legacy callers may
+        pass the exact ``result['envelope']`` dict from a successful ``tx_prepare_*`` tool. If you mistakenly pass ``swap_prepare``'s legacy ``prepared`` object
         (``route_id`` + ``transaction_request`` only), this tool attempts to repair it.
         """
         if not prepared_id and isinstance(envelope, dict) and envelope.get("prepared_id"):

@@ -13,7 +13,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 
 from aurey.custody import FakeSecretStore
 from aurey.graphs import DeterministicTxPipeline, TxExecuteInput
-from aurey.graphs.evm_codec import normalize_evm_address
+from aurey.graphs.evm_codec import normalize_evm_address, to_checksum_evm_address
 from aurey.reasoning import create_aurey_deep_agent, make_memory_checkpointer, thread_config
 from aurey.reasoning import deep_agent as deep_agent_mod
 from aurey.runtime import AureyRuntime
@@ -334,6 +334,8 @@ def test_tx_prepare_named_tool_ignores_legacy_kind_field():
     )
     assert out["ok"] is True
     assert out["result"]["envelope"]["kind"] == "erc20_transfer"
+    assert out["result"]["prepared_id"].startswith("ptx_")
+    assert out["result"]["envelope"]["data_selector"] == "0xa9059cbb"
     _assert_no_banned_values(out)
 
 
@@ -656,10 +658,11 @@ def test_earn_prepare_deposit_tool_rejects_non_composer_vault():
     secrets = {signing_path: "0x" + "ff" * 32}
     settings = AureySettings(wallet_signing_key_secret_path=signing_path)
     vault = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    vault_path = to_checksum_evm_address(vault)
 
     def match_vault(**kw: object) -> bool:
         u = str(kw.get("url") or "")
-        return kw.get("method") == "GET" and f"/v1/vaults/8453/{vault}" in u and "earn.li.fi" in u
+        return kw.get("method") == "GET" and f"/v1/vaults/8453/{vault_path}" in u and "earn.li.fi" in u
 
     http = ScriptedHttpClient(
         [
@@ -707,10 +710,11 @@ def test_earn_prepare_deposit_tool_non_transactional_without_composer_rejected()
     secrets = {signing_path: "0x" + "ff" * 32}
     settings = AureySettings(wallet_signing_key_secret_path=signing_path)
     vault = "0xdddddddddddddddddddddddddddddddddddddddd"
+    vault_path = to_checksum_evm_address(vault)
 
     def match_vault(**kw: object) -> bool:
         u = str(kw.get("url") or "")
-        return kw.get("method") == "GET" and "/v1/vaults/8453/" in u and vault in u
+        return kw.get("method") == "GET" and "/v1/vaults/8453/" in u and vault_path in u
 
     http = ScriptedHttpClient(
         [
