@@ -13,7 +13,16 @@ from aurey.custody.errors import SecretNotFoundError, SecretStoreUnavailableErro
 from aurey.graphs.chains import chain_id_for, chain_name_for_id
 from aurey.graphs.evm_codec import normalize_evm_address
 from aurey.graphs.ports import HttpJsonRequestError
-from aurey.graphs.results import GraphErrorBody
+from aurey.graphs.results import (
+    EarnChainResult,
+    EarnPortfolioPositionResult,
+    EarnPortfolioPositionsResult,
+    EarnProtocolResult,
+    EarnVaultDetailResult,
+    EarnVaultListResult,
+    EarnVaultSummary,
+    GraphErrorBody,
+)
 from aurey.runtime import AureyRuntime
 
 _log = logging.getLogger(__name__)
@@ -307,6 +316,19 @@ def _trim_position(raw: Any) -> dict[str, Any]:
     }
 
 
+def _dump_portfolio_position(row: EarnPortfolioPositionResult) -> dict[str, Any]:
+    """Match `_trim_position`: top-level nulls preserved; ``asset`` omits null-only keys."""
+
+    return {
+        "chain_id": row.chain_id,
+        "address": row.address,
+        "protocol_name": row.protocol_name,
+        "asset": row.asset.model_dump(exclude_none=True),
+        "balance_usd": row.balance_usd,
+        "balance_native": row.balance_native,
+    }
+
+
 def _validate_node(state: EarnGraphState) -> EarnGraphState:
     try:
         parsed = EarnGraphInput.model_validate(state.get("input") or {})
@@ -405,7 +427,11 @@ def _execute_node(runtime: AureyRuntime, state: EarnGraphState) -> EarnGraphStat
                         details={"got_type": type(raw).__name__},
                     ).model_dump()
                 }
-            chains = [_trim_chain_item(x) for x in raw if isinstance(x, dict)]
+            chains = [
+                EarnChainResult.model_validate(_trim_chain_item(x)).model_dump(exclude_none=True)
+                for x in raw
+                if isinstance(x, dict)
+            ]
             return {"result": {"chains": chains}}
 
         if parsed.operation == "list_protocols":
@@ -423,7 +449,11 @@ def _execute_node(runtime: AureyRuntime, state: EarnGraphState) -> EarnGraphStat
                         details={"got_type": type(raw).__name__},
                     ).model_dump()
                 }
-            protocols = [_trim_protocol_core(x) for x in raw if isinstance(x, dict)]
+            protocols = [
+                EarnProtocolResult.model_validate(_trim_protocol_core(x)).model_dump(exclude_none=True)
+                for x in raw
+                if isinstance(x, dict)
+            ]
             return {"result": {"protocols": protocols}}
 
         if parsed.operation == "list_vaults":
@@ -467,13 +497,23 @@ def _execute_node(runtime: AureyRuntime, state: EarnGraphState) -> EarnGraphStat
             rows = raw.get("data")
             if not isinstance(rows, list):
                 rows = []
+            listed = EarnVaultListResult(
+                vaults=[
+                    EarnVaultSummary.model_validate(_trim_vault_row(x))
+                    for x in rows
+                    if isinstance(x, dict)
+                ],
+                total=raw.get("total"),
+                normalized_at=raw.get("normalizedAt"),
+                next_cursor=(raw.get("nextCursor") or None),
+            )
             out: dict[str, Any] = {
-                "vaults": [_trim_vault_row(x) for x in rows if isinstance(x, dict)],
-                "total": raw.get("total"),
-                "normalized_at": raw.get("normalizedAt"),
+                "vaults": [v.model_dump(exclude_none=True) for v in listed.vaults],
+                "total": listed.total,
+                "normalized_at": listed.normalized_at,
             }
-            if raw.get("nextCursor"):
-                out["next_cursor"] = raw["nextCursor"]
+            if listed.next_cursor:
+                out["next_cursor"] = listed.next_cursor
             return {"result": out}
 
         if parsed.operation == "get_vault":
@@ -503,7 +543,9 @@ def _execute_node(runtime: AureyRuntime, state: EarnGraphState) -> EarnGraphStat
                         details={"got_type": type(raw).__name__},
                     ).model_dump()
                 }
-            return {"result": {"vault": _trim_vault_row(raw)}}
+            vault = EarnVaultSummary.model_validate(_trim_vault_row(raw))
+            detail = EarnVaultDetailResult(vault=vault)
+            return {"result": {"vault": detail.vault.model_dump(exclude_none=True)}}
 
         if parsed.operation == "portfolio_positions":
             w = normalize_evm_address(str(parsed.wallet_address))
@@ -525,11 +567,13 @@ def _execute_node(runtime: AureyRuntime, state: EarnGraphState) -> EarnGraphStat
             pos = raw.get("positions")
             if not isinstance(pos, list):
                 pos = []
-            return {
-                "result": {
-                    "positions": [_trim_position(x) for x in pos if isinstance(x, dict)],
-                }
-            }
+            positions = [
+                EarnPortfolioPositionResult.model_validate(_trim_position(x))
+                for x in pos
+                if isinstance(x, dict)
+            ]
+            bundle = EarnPortfolioPositionsResult(positions=positions)
+            return {"result": {"positions": [_dump_portfolio_position(p) for p in bundle.positions]}}
 
         return {
             "error": GraphErrorBody(

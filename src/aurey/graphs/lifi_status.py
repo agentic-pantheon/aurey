@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, ValidationError
 from aurey.custody.errors import SecretNotFoundError, SecretStoreUnavailableError
 from aurey.graphs.chains import chain_id_for
 from aurey.graphs.ports import HttpJsonRequestError
-from aurey.graphs.results import GraphErrorBody
+from aurey.graphs.results import GraphErrorBody, LiFiStatusResult
 from aurey.runtime import AureyRuntime
 
 _log = logging.getLogger(__name__)
@@ -323,7 +323,9 @@ def _execute_node(runtime: AureyRuntime, state: LiFiStatusGraphState) -> LiFiSta
                     details={"got_type": type(payload).__name__},
                 ).model_dump()
             }
-        return {"result": _normalize_status_payload(payload)}
+        normalized = _normalize_status_payload(payload)
+        status = LiFiStatusResult.model_validate(normalized)
+        return {"result": status.model_dump(exclude_none=True)}
     except HttpJsonRequestError as exc:
         _log.debug("LiFi status HTTP error", exc_info=True)
         return {
