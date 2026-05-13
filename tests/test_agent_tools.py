@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from langchain_core.language_models import BaseChatModel
@@ -95,6 +97,13 @@ def test_tool_schemas_include_expected_names_and_descriptions():
         "alchemy_get_token_prices",
         "alchemy_get_portfolio_tokens",
         "alchemy_get_transfer_history",
+        "earn_list_chains",
+        "earn_list_protocols",
+        "earn_list_vaults",
+        "earn_get_vault",
+        "earn_portfolio_positions",
+        "earn_prepare_deposit",
+        "lifi_get_status",
         "swap_prepare",
         "tx_prepare_lifi_swap",
         "tx_prepare_native_transfer",
@@ -602,3 +611,277 @@ def test_runtime_wiring_context_for_deep_agent_prompt_no_identifiers_or_paths():
     assert "postgresql://" not in out
     assert "agent-value-must-not-appear" not in out
     assert "vault-xyz-do-not-show" not in out
+
+
+def test_earn_list_vaults_tool_ok_with_trimmed_rows():
+    """Vault rows match Earn graph trimming (no unknown Earn API keys in results)."""
+
+    signing_path = "vault/signing/local"
+    secrets = {signing_path: "0x" + "ff" * 32}
+    settings = AureySettings(wallet_signing_key_secret_path=signing_path)
+
+    def match_vaults(**kw: object) -> bool:
+        return kw.get("method") == "GET" and "earn.li.fi/v1/vaults" in str(kw.get("url") or "")
+
+    fat_row = {
+        "address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "chainId": 8453,
+        "name": "Fat row",
+        "protocol": {"id": "x", "name": "Y"},
+        "isTransactional": True,
+        "isComposerSupported": True,
+        "ignoredByTrim": {"nested": ["should", "not", "appear"]},
+    }
+    http = ScriptedHttpClient([(match_vaults, {"data": [fat_row], "total": 1})])
+    runtime = AureyRuntime(
+        settings=settings,
+        secret_store=FakeSecretStore(secrets),
+        evm_rpc_factory=rpc_factory_from_mapping({}),
+        http=http,
+        tx_pipeline=DeterministicTxPipeline(),
+        lifi_base_url="https://li.quest",
+    )
+    tool = _tool_by_name(build_aurey_subgraph_tools(runtime), "earn_list_vaults")
+    out = tool.invoke({"chain": "base", "limit": 5})
+    assert out["ok"] is True
+    row = out["result"]["vaults"][0]
+    assert "ignoredByTrim" not in row
+    assert row["address"] == "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    assert row.get("chain") == "base"
+    _assert_no_banned_values(out)
+
+
+def test_earn_prepare_deposit_tool_rejects_non_composer_vault():
+    signing_path = "vault/signing/local"
+    secrets = {signing_path: "0x" + "ff" * 32}
+    settings = AureySettings(wallet_signing_key_secret_path=signing_path)
+    vault = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    def match_vault(**kw: object) -> bool:
+        u = str(kw.get("url") or "")
+        return kw.get("method") == "GET" and f"/v1/vaults/8453/{vault}" in u and "earn.li.fi" in u
+
+    http = ScriptedHttpClient(
+        [
+            (
+                match_vault,
+                {
+                    "address": vault,
+                    "chainId": 8453,
+                    "name": "No Composer",
+                    "protocol": {"id": "x"},
+                    "isComposerSupported": False,
+                    "isTransactional": True,
+                },
+            )
+        ]
+    )
+    runtime = AureyRuntime(
+        settings=settings,
+        secret_store=FakeSecretStore(secrets),
+        evm_rpc_factory=rpc_factory_from_mapping({}),
+        http=http,
+        tx_pipeline=DeterministicTxPipeline(),
+        lifi_base_url="https://li.quest",
+    )
+    tool = _tool_by_name(build_aurey_subgraph_tools(runtime), "earn_prepare_deposit")
+    out = tool.invoke(
+        {
+            "vault_chain": "base",
+            "vault_address": vault,
+            "from_chain": "base",
+            "from_asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            "from_amount_wei": "1000000",
+            "from_address": "0xcccccccccccccccccccccccccccccccccccccccc",
+        }
+    )
+    assert out["ok"] is False
+    assert out["error"]["code"] == "invalid_input"
+    assert "Composer" in out["error"]["message"]
+    assert http.calls and len(http.calls) == 1
+    _assert_no_banned_values(out)
+
+
+def test_earn_prepare_deposit_tool_non_transactional_without_composer_rejected():
+    signing_path = "vault/signing/local"
+    secrets = {signing_path: "0x" + "ff" * 32}
+    settings = AureySettings(wallet_signing_key_secret_path=signing_path)
+    vault = "0xdddddddddddddddddddddddddddddddddddddddd"
+
+    def match_vault(**kw: object) -> bool:
+        u = str(kw.get("url") or "")
+        return kw.get("method") == "GET" and "/v1/vaults/8453/" in u and vault in u
+
+    http = ScriptedHttpClient(
+        [
+            (
+                match_vault,
+                {
+                    "address": vault,
+                    "chainId": 8453,
+                    "protocol": {"id": "x"},
+                    "isTransactional": False,
+                },
+            )
+        ]
+    )
+    runtime = AureyRuntime(
+        settings=settings,
+        secret_store=FakeSecretStore(secrets),
+        evm_rpc_factory=rpc_factory_from_mapping({}),
+        http=http,
+        tx_pipeline=DeterministicTxPipeline(),
+        lifi_base_url="https://li.quest",
+    )
+    tool = _tool_by_name(build_aurey_subgraph_tools(runtime), "earn_prepare_deposit")
+    out = tool.invoke(
+        {
+            "vault_chain": "base",
+            "vault_address": vault,
+            "from_chain": "base",
+            "from_asset": "eth",
+            "from_amount_wei": "1000000000000000",
+            "from_address": "0xcccccccccccccccccccccccccccccccccccccccc",
+        }
+    )
+    assert out["ok"] is False
+    assert out["error"]["code"] == "invalid_input"
+    assert "transactional" in out["error"]["message"].lower()
+
+
+def _lifi_quote_response_stub(*, route_tag: str, tx_chain_id: int) -> dict[str, Any]:
+    return {
+        "id": route_tag,
+        "estimate": {"approvalAddress": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "action": {
+            "fromAmount": "1000000",
+            "fromToken": {"address": "0x1111111111111111111111111111111111111111"},
+        },
+        "transactionRequest": {
+            "to": "0x3333333333333333333333333333333333333333",
+            "data": "0xdeadbeef",
+            "value": "0x0",
+            "chainId": tx_chain_id,
+            "from": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "gasLimit": "0x5208",
+        },
+    }
+
+
+def test_earn_prepare_deposit_tool_uses_vault_as_to_token_and_stores_execute_prepared_id():
+    signing_path = "vault/signing/local"
+    secrets = {signing_path: "0x" + "ff" * 32}
+    settings = AureySettings(wallet_signing_key_secret_path=signing_path)
+    wallet = "0xcccccccccccccccccccccccccccccccccccccccc"
+    vault = "0x2222222222222222222222222222222222222222"
+
+    def match_earn_vault(**kw: object) -> bool:
+        u = str(kw.get("url") or "").lower()
+        return kw.get("method") == "GET" and "earn.li.fi/v1/vaults/8453/" in u and vault.lower() in u
+
+    def match_lifi_quote(**kw: object) -> bool:
+        u = str(kw.get("url") or "")
+        if kw.get("method") != "GET" or "/v1/quote?" not in u or "li.quest" not in u:
+            return False
+        q = parse_qs(urlparse(u).query)
+        return q.get("toToken") == [vault.lower()] and q.get("toChain") == ["8453"]
+
+    http = ScriptedHttpClient(
+        [
+            (
+                match_earn_vault,
+                {
+                    "address": vault,
+                    "chainId": 8453,
+                    "name": "Composer vault",
+                    "protocol": {"id": "pv"},
+                    "isComposerSupported": True,
+                    "isTransactional": True,
+                },
+            ),
+            (match_lifi_quote, _lifi_quote_response_stub(route_tag="earn-dep-1", tx_chain_id=8453)),
+        ]
+    )
+    runtime = AureyRuntime(
+        settings=settings,
+        secret_store=FakeSecretStore(secrets),
+        evm_rpc_factory=rpc_factory_from_mapping({}),
+        http=http,
+        tx_pipeline=DeterministicTxPipeline(),
+        lifi_base_url="https://li.quest",
+    )
+    tool = _tool_by_name(build_aurey_subgraph_tools(runtime), "earn_prepare_deposit")
+    out = tool.invoke(
+        {
+            "vault_chain": "base",
+            "vault_address": vault,
+            "from_chain": "base",
+            "from_asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            "from_amount_wei": "1000000",
+            "from_address": wallet,
+        }
+    )
+    assert out["ok"] is True
+    pid = out["result"]["prepared_id"]
+    assert pid.startswith("ptx_")
+    assert out["result"]["prepared"]["route_id"] == "earn-dep-1"
+    assert out["result"]["earn_deposit"]["requires_status_polling"] is False
+    assert out["result"]["earn_deposit"]["vault"]["address"] == vault
+
+
+def test_earn_prepare_deposit_tool_cross_chain_sets_requires_status_polling():
+    signing_path = "vault/signing/local"
+    secrets = {signing_path: "0x" + "ff" * 32}
+    settings = AureySettings(wallet_signing_key_secret_path=signing_path)
+    wallet = "0xcccccccccccccccccccccccccccccccccccccccc"
+    vault = "0x2222222222222222222222222222222222222222"
+
+    def match_earn_vault(**kw: object) -> bool:
+        u = str(kw.get("url") or "").lower()
+        return kw.get("method") == "GET" and "earn.li.fi/v1/vaults/8453/" in u and vault.lower() in u
+
+    def match_lifi_quote(**kw: object) -> bool:
+        u = str(kw.get("url") or "")
+        if kw.get("method") != "GET" or "/v1/quote?" not in u or "li.quest" not in u:
+            return False
+        q = parse_qs(urlparse(u).query)
+        return q.get("fromChain") == ["1"] and q.get("toChain") == ["8453"]
+
+    http = ScriptedHttpClient(
+        [
+            (
+                match_earn_vault,
+                {
+                    "address": vault,
+                    "chainId": 8453,
+                    "name": "Composer vault",
+                    "protocol": {"id": "pv"},
+                    "isComposerSupported": True,
+                    "isTransactional": True,
+                },
+            ),
+            (match_lifi_quote, _lifi_quote_response_stub(route_tag="earn-dep-xc", tx_chain_id=1)),
+        ]
+    )
+    runtime = AureyRuntime(
+        settings=settings,
+        secret_store=FakeSecretStore(secrets),
+        evm_rpc_factory=rpc_factory_from_mapping({}),
+        http=http,
+        tx_pipeline=DeterministicTxPipeline(),
+        lifi_base_url="https://li.quest",
+    )
+    tool = _tool_by_name(build_aurey_subgraph_tools(runtime), "earn_prepare_deposit")
+    out = tool.invoke(
+        {
+            "vault_chain": "base",
+            "vault_address": vault,
+            "from_chain": "ethereum",
+            "from_asset": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "from_amount_wei": "1000000",
+            "from_address": wallet,
+        }
+    )
+    assert out["ok"] is True
+    assert out["result"]["earn_deposit"]["requires_status_polling"] is True
+    _assert_no_banned_values(out)
