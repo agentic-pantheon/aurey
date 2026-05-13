@@ -16,7 +16,13 @@ def test_normalize_contract_calldata_lowercases_and_rejects_odd_length():
         normalize_contract_calldata("0xabc")
 
 
-def test_lifi_mapper_oneclaw_intents_omits_signing_key_path():
+def test_normalize_contract_calldata_strips_embedded_whitespace():
+    inner = "abcd" * 16  # 64 hex chars (32 bytes)
+    raw = "0x095ea7b3\n" + inner[:32] + " " + inner[32:]
+    assert normalize_contract_calldata(raw) == "0x095ea7b3" + inner.lower()
+
+
+def test_lifi_mapper_oneclaw_intents_omits_signing_key_path_when_unset():
     env = lifi_transaction_request_to_envelope(
         chain_id=8453,
         from_address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -31,6 +37,23 @@ def test_lifi_mapper_oneclaw_intents_omits_signing_key_path():
     )
     assert env.signing_mode == "oneclaw_intents"
     assert env.signing_key_secret_path is None
+
+
+def test_lifi_mapper_oneclaw_intents_passes_through_signing_key_path_override():
+    env = lifi_transaction_request_to_envelope(
+        chain_id=8453,
+        from_address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        transaction_request={
+            "to": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "data": "0x",
+            "value": 0,
+            "chainId": 8453,
+        },
+        signing_mode="oneclaw_intents",
+        signing_key_secret_path="aurey/wallets/primary/signing_key",
+    )
+    assert env.signing_mode == "oneclaw_intents"
+    assert env.signing_key_secret_path == "aurey/wallets/primary/signing_key"
 
 
 def test_lifi_mapper_accepts_numeric_chain_id_and_value():

@@ -204,6 +204,172 @@ class TxExecuteResult(BaseModel):
     stages: dict[str, Literal["ok"]]
 
 
+class EarnChainResult(BaseModel):
+    """Trimmed LiFi Earn `/v1/chains` row."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: Any | None = None
+    chain_id: Any | None = None
+    network_caip: Any | None = None
+    chain: str | None = None
+
+
+class EarnProtocolResult(BaseModel):
+    """Trimmed LiFi Earn protocol core."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: Any | None = None
+    name: Any | None = None
+    logo_uri: Any | None = None
+    url: Any | None = None
+
+
+class EarnTokenSummary(BaseModel):
+    """Trimmed token row from Earn vault payloads."""
+
+    model_config = ConfigDict(frozen=True)
+
+    address: Any | None = None
+    symbol: Any | None = None
+    name: Any | None = None
+    decimals: Any | None = None
+    weight: Any | None = None
+    price_usd: Any | None = None
+
+
+class EarnVaultSummary(BaseModel):
+    """Trimmed LiFi Earn vault row (list + detail)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    address: Any | None = None
+    network: Any | None = None
+    chain_id: Any | None = None
+    slug: Any | None = None
+    name: Any | None = None
+    protocol: EarnProtocolResult = Field(default_factory=EarnProtocolResult)
+    tags: Any | None = None
+    analytics: dict[str, Any] | None = None
+    chain: str | None = None
+    is_transactional: Any | None = None
+    is_redeemable: Any | None = None
+    is_composer_supported: Any | None = None
+    kyc: Any | None = None
+    time_lock: Any | None = None
+    caps: Any | None = None
+    verification_status: Any | None = None
+    deposit_packs: Any | None = None
+    redeem_packs: Any | None = None
+    synced_at: Any | None = None
+    underlying_tokens: list[EarnTokenSummary] | None = None
+    lp_tokens: list[EarnTokenSummary] | None = None
+    reward_tokens: list[EarnTokenSummary] | None = None
+
+
+class EarnVaultListResult(BaseModel):
+    """LiFi Earn paginated vault list payload."""
+
+    model_config = ConfigDict(frozen=True)
+
+    vaults: list[EarnVaultSummary]
+    total: Any | None = None
+    normalized_at: Any | None = None
+    next_cursor: Any | None = None
+
+
+class EarnVaultDetailResult(BaseModel):
+    """LiFi Earn single-vault payload."""
+
+    model_config = ConfigDict(frozen=True)
+
+    vault: EarnVaultSummary
+
+
+class EarnPortfolioAssetResult(BaseModel):
+    """Trimmed ``asset`` object inside Earn portfolio positions."""
+
+    model_config = ConfigDict(frozen=True)
+
+    address: Any | None = None
+    name: Any | None = None
+    symbol: Any | None = None
+    decimals: Any | None = None
+
+
+class EarnPortfolioPositionResult(BaseModel):
+    """Trimmed LiFi Earn portfolio position row."""
+
+    model_config = ConfigDict(frozen=True)
+
+    chain_id: Any | None = None
+    address: Any | None = None
+    protocol_name: Any | None = None
+    asset: EarnPortfolioAssetResult = Field(default_factory=EarnPortfolioAssetResult)
+    balance_usd: Any | None = None
+    balance_native: Any | None = None
+
+
+class EarnPortfolioPositionsResult(BaseModel):
+    """LiFi Earn portfolio positions payload."""
+
+    model_config = ConfigDict(frozen=True)
+
+    positions: list[EarnPortfolioPositionResult]
+
+
+class LiFiStatusTokenResult(BaseModel):
+    """Trimmed token fragment under LiFi status tx info."""
+
+    model_config = ConfigDict(frozen=True)
+
+    address: Any | None = None
+    symbol: Any | None = None
+    decimals: Any | None = None
+    chain_id: Any | None = None
+    name: Any | None = None
+    coin_key: Any | None = None
+
+
+class LiFiStatusTxInfoResult(BaseModel):
+    """Trimmed ``sending`` / ``receiving`` fragment from LiFi `/v1/status`."""
+
+    model_config = ConfigDict(frozen=True)
+
+    tx_hash: Any | None = None
+    tx_link: Any | None = None
+    amount: Any | None = None
+    chain_id: Any | None = None
+    value: Any | None = None
+    timestamp: Any | None = None
+    token: LiFiStatusTokenResult | None = None
+    gas_token: LiFiStatusTokenResult | None = None
+
+
+class LiFiStatusMetadataResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    integrator: Any | None = None
+
+
+class LiFiStatusResult(BaseModel):
+    """Normalized LiFi `/v1/status` payload (trimmed)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    status: Any | None = None
+    substatus: Any | None = None
+    transaction_id: Any | None = None
+    tool: Any | None = None
+    lifi_explorer_link: Any | None = None
+    from_address: Any | None = None
+    to_address: Any | None = None
+    sending: LiFiStatusTxInfoResult | None = None
+    receiving: LiFiStatusTxInfoResult | None = None
+    metadata: LiFiStatusMetadataResult | None = None
+
+
 class GraphRunResult(BaseModel):
     """Top-level graph response wrapper."""
 
