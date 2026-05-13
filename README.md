@@ -1,91 +1,191 @@
 # Aurey
 
-Python 3.12+ scaffold for a standalone **Deep Agent** with **LangGraph**-backed tools, **Pydantic Settings**, and an optional **FastAPI** invoke API. Production wiring resolves provider material through **1Claw** (`SecretStore`); EVM RPC URLs are derived from the Alchemy API key path, and only the bootstrap API key is read from the environment variable named by `oneclaw_api_key_secret_source`.
+### **Production-grade EVM agentic wallet. LangGraph brains. Secrets that never sleep in `.env`.**
 
-## Layout
+**A standalone autonomous wallet agent** — reason over chain state, compose DeFi flows, and broadcast transactions — with **vault-backed custody via [1Claw](https://docs.1claw.xyz)** so operators ship a **secure agent** without drowning in key sprawl.
 
-- `src/aurey/settings/` - Pydantic settings: 1Claw connection fields, **vault path** references only (never inline secrets). Bootstrap API key is read via the env var **named** by `oneclaw_api_key_secret_source` (default `AUREY_ONECLAW_BOOTSTRAP_API_KEY`).
-- `src/aurey/custody/` - `SecretStore` protocol, `SecretValue`, `OneClawHttpClient` / `OneClawSecretStore`, and in-memory `Fake`* helpers for tests.
-- `src/aurey/reasoning/` - deep agent harness and factory.
-- `src/aurey/tools/` - LangChain tool definitions.
-- `src/aurey/graphs/` - compiled subgraphs per tool.
-- `src/aurey/service/` - optional HTTP boundary (`bootstrap`, adapters, `FastAPI` app, DI helpers).
-- `src/aurey/telegram/` - optional Telegram bot client reusing the service invoke path.
+[LangGraph](https://github.com/langchain-ai/langgraph)  
+[Deep Agents](https://github.com/langchain-ai/deepagents)  
+[1Claw](https://docs.1claw.xyz)  
+[FastAPI](https://fastapi.tiangolo.com/)  
+[GitHub stars](https://github.com/agentic-pantheon/aurey)
 
-## Setup
+[Deploy Agent on Railway](#one-click-deploy-on-railway)
 
-```bash
-uv sync --group dev
-```
+**[⭐ Star if you ship agents](https://github.com/agentic-pantheon/aurey)** · **[Report an issue](https://github.com/agentic-pantheon/aurey/issues/new)** · **[Agentic Pantheon org](https://github.com/agentic-pantheon)**
 
-Optional HTTP stack:
+---
 
-```bash
-uv sync --group dev --extra api
-```
+## ✨ Why Aurey?
 
-Optional Telegram stack:
 
-```bash
-uv sync --group dev --extra telegram
-```
+| Problem                                             | Aurey                                                                                                                  |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Autonomous wallets leak keys into env vars and logs | Configuration holds **vault paths only** — **1Claw** resolves provider material through a **Secret Store** abstraction |
+| “Agent demos” ≠ production graph logic              | Built on **LangGraph** + Deep Agents harness for repeatable, inspectable workflows                                     |
+| Web3 × AI integrations sprawl forever               | Batteries-included EVM tooling (reads, prepares, executes) wired for **production HTTP** + optional Telegram           |
 
-Copy `.env.example` to `.env` and set at least `AUREY_ONECLAW_VAULT_ID` and `AUREY_ONECLAW_BOOTSTRAP_API_KEY` before running the service.
 
-For default models like `openai:gpt-4o-mini`, set `OPENAI_API_KEY` in `.env`. The project depends on `langchain-openai`; run `uv sync --group dev` after pulling so it is installed.
+If you’re an **AI agent builder**, **Web3 developer**, or **protocol team** shipping user-facing autonomy, Aurey is the **secure agent → autonomous wallet** path that stays boring where it matters: **custody**.
 
-### Optional HTTP server
+---
 
-After installing `aurey[api]`, run Uvicorn with the ASGI factory (builds the app after lifespan wiring):
+## 🚀 Key features
 
-```bash
-uv run uvicorn aurey.service.app:app --factory --host 127.0.0.1 --port 8000
-```
+- 🧠 **LangGraph-powered reasoning** — Compose graphs per capability; deterministic boundaries between “think,” “simulate,” and “send.”  
+- 🔐 **1Claw-first security** — **Secure agent** pattern: bootstrap API key from a named env var; everything else resolves from the vault.
+- ⛓️ **Native EVM agentic wallet** — Read chain state, prepare and execute transactions, interoperate with real protocols (routing / yield flows per your tooling).   
+- 🗄️ **Postgres checkpoints** — Optional **PostgreSQL** LangChain checkpointer for resilient multi-turn sessions.  
+- ✈️ **Telegram shell** — chat with Aurey from telegram.  
+- 📊 **Operations-ready hooks** — LangSmith-friendly tracing knobs; structured agent trace for evaluations.
 
-Endpoints:
+---
 
-- `GET /health` - readiness (`{"ok": true}` when bootstrap succeeded, `{"ok": false}` if required wiring such as 1Claw is missing).
-- `POST /v1/invoke` - JSON body: `message`, `session_id`, optional `context` (stored under configurable `aurey_context`), optional `model`. Responses are structured (`InvokeResponse`); misconfiguration and agent failures use stable error codes without embedding secrets.
+## ⚡ Quick start
 
-With `DATABASE_URL` or `AUREY_DATABASE_URL` set and `aurey[api]` installed, the service uses a **PostgreSQL** LangGraph checkpointer (tables are created on startup via `setup()`). Without a DB URL it uses an in-memory saver.
-
-### Deploying on Railway
-
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/10EU4s?referralCode=WNfHEr&utm_medium=integration&utm_source=template&utm_campaign=generic)
-
-1. Create a **Postgres** service in the same Railway project as the app.
-2. On the app service, set `DATABASE_URL` to `${{Postgres.DATABASE_URL}}` (use the exact Postgres service name Railway shows; references are case-sensitive).
-3. Set the usual secrets: `AUREY_ONECLAW_VAULT_ID`, `AUREY_ONECLAW_BOOTSTRAP_API_KEY`, provider keys (e.g. `OPENAI_API_KEY`), and optional LangSmith vars (`LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`). See `.env.example`.
-4. The repo includes [`railway.toml`](railway.toml) with `uv sync --extra api` and a Uvicorn start command bound to `0.0.0.0` and `$PORT`.
-
-The **Telegram** bot (`run_telegram.py`) is a separate process; run it as another Railway service if you need it in production.
-
-For tests, inject `state=` into `create_fastapi_application` or monkeypatch `create_aurey_deep_agent` so no live model or network is required.
-
-### Optional Telegram bot
-
-Telegram reuses the same `AureyServiceState` and deep-agent invocation path as `POST /v1/invoke`. Store the bot token in 1Claw and configure only the vault path:
+### 1 · Install dependencies
 
 ```bash
-AUREY_TELEGRAM_BOT_TOKEN_SECRET_PATH=aurey/telegram/bot_token
+git clone https://github.com/agentic-pantheon/aurey.git
+cd aurey
+
+uv sync --group dev           # core + dev toolchain
+uv sync --group dev --extra api      # FastAPI HTTP service
+uv sync --group dev --extra telegram # optional Telegram bot deps
 ```
 
-Then bootstrap and run polling from a small entrypoint:
+### 2 · Configure environment (minimal)
 
-```python
-from aurey.telegram import create_telegram_application
-
-create_telegram_application().run_polling()
+```bash
+cp .env.example .env
 ```
 
-Do not place the Telegram token in `.env`; only the 1Claw path belongs in configuration.
+Set at least `**AUREY_ONECLAW_VAULT_ID**`, `**AUREY_ONECLAW_BOOTSTRAP_API_KEY**` (the bootstrap key’s value goes in env; vault entries stay path-based), and your model provider (`**OPENAI_API_KEY**` when using defaults like `openai:gpt-4o-mini`). See `[.env.example](.env.example)` for vault paths (**Alchemy**, **LiFi**, **signing key**, **Telegram**, etc.). **Do not inline production secrets.**
 
-To **restrict** which conversations can use the bot, set `AUREY_TELEGRAM_ALLOWED_CHAT_IDS` to a comma- or whitespace-separated list of numeric Telegram **chat** ids (omit or leave empty for no restriction). In a private chat with you, the chat id is the same as your user id; groups and supergroups use negative ids (often starting with `-100`). Discover ids by forwarding a message to a bot such as `@RawDataBot` or by temporarily logging `effective_chat.id` from updates.
+### 3 · Run the HTTP API locally
 
-## Development
+From an environment with `**aurey[api]`** installed:
+
+```bash
+uv run python run_http.py --host 127.0.0.1 --port 8000
+```
+
+Smoke `**GET /health**`, then call `**POST /v1/invoke**` with JSON: `message`, `session_id`, optional `context`, optional `model`. Responses follow `InvokeResponse` — errors surface **stable codes** without secret leakage.
+
+### 4 · One click deploy on Railway
+
+**Before Railway:** create a **1Claw account** here so Aurey has a vault and agent to talk to ([docs](https://docs.1claw.xyz)):
+
+1. **Create an account** — Sign up or log in to the **[1Claw dashboard](https://1claw.xyz/)**.
+2. **Create a vault** — Add a vault for your deployment. Inside it, create **secret entries at these paths** (the path strings are yours to choose; use the same strings in `.env` via the variables below):
+
+  | Set in 1Claw at path… (example) | Aurey env var (path only)              | What to store                                                                              |
+  | ------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------ |
+  | `aurey/alchemy/api_key`         | `AUREY_ALCHEMY_API_SECRET_PATH`        | **Alchemy API key**  *(needed for portfolio and data api)*             |
+  | `aurey/lifi/api_key`            | `AUREY_LIFI_API_SECRET_PATH`           | **LiFi API key**        *(needed for 1click deposits on major protocols)*                                                                    |
+  | `aurey/wallet/signing_key`      | `AUREY_WALLET_SIGNING_KEY_SECRET_PATH` | **Your wallet private key** *(required when `AUREY_EVM_SIGNING_MODE=vault_key`, the default)* |
+  | `aurey/telegram/bot_token`      | `AUREY_TELEGRAM_BOT_TOKEN_SECRET_PATH` | **Telegram bot token** *(Telegram bot token from telegram botfather)*                                |
+
+   Paths like `aurey/...` are **examples** — any stable vault path works as long as `**AUREY_*_SECRET_PATH` matches what you configured in the 1Claw UI** and you never put the secret values in Aurey’s env (only the path strings + vault id + bootstrap key).
+3. **Create an agent** — Register a **hosted agent** (or equivalent) tied to that vault so the bootstrap API key can resolve secrets and (when configured) sign transactions via 1Claw’s flows.
+4. **Wire secrets in the UI** — Paste each real secret value at the path you picked in step 2. Double-check that `**AUREY_ALCHEMY_API_SECRET_PATH`**, `**AUREY_WALLET_SIGNING_KEY_SECRET_PATH**` (if using `vault_key` signing), `**AUREY_LIFI_API_SECRET_PATH**`, and `**AUREY_TELEGRAM_BOT_TOKEN_SECRET_PATH**` in `.env` / Railway **exactly match** those vault paths (not the secrets themselves).
+5. **Copy IDs for Railway** — Note the **vault ID** for `AUREY_ONECLAW_VAULT_ID` and create or copy the **bootstrap / agent API key** into `AUREY_ONECLAW_BOOTSTRAP_API_KEY` (never commit it; set it only in Railway).
+6. then, click here to [Deploy on Railway](https://railway.com/deploy/10EU4s?referralCode=WNfHEr&utm_medium=integration&utm_source=template&utm_campaign=generic). add the needed variables in the template.
+
+
+
+---
+
+## 🎬 Demo
+
+> **[ Add your walkthrough embed here ]**
+
+```html
+<!-- Example: paste a Loom or YouTube iframe below -->
+<!--
+<iframe ... src="https://www.loom.com/embed/VIDEO_ID"></iframe>
+-->
+```
+
+
+---
+
+## 🏗 Architecture
+
+### Request path (mental model)
+
+```mermaid
+flowchart LR
+  Client[HTTP / Telegram] --> API[FastAPI invoke]
+  API --> Agent[Deep agent + LangGraph]
+  Agent --> Custody[1Claw SecretStore]
+  Custody --> Keys[Vault paths resolve at runtime]
+  Agent --> Graphs[Compiled subgraphs: read / prepare / execute]
+  Graphs --> EVM[EVM RPC + tx pipeline]
+```
+
+
+
+### Repository layout (`src/aurey/`)
+
+
+| Area         | Role                                                                                          |
+| ------------ | --------------------------------------------------------------------------------------------- |
+| `settings/`  | Pydantic settings — **vault path references**, bootstrap API key env **name**, model defaults |
+| `custody/`   | `SecretStore`, `SecretValue`, `OneClawHttpClient`, fakes for tests                            |
+| `reasoning/` | Deep agent harness, factory                                                                   |
+| `tools/`     | LangChain tool surfaces                                                                       |
+| `graphs/`    | LangGraph subgraphs (EVM codecs, swaps, txs, checkpoints)                                     |
+| `service/`   | FastAPI app, bootstrap, adapters, `**/v1/invoke`**                                            |
+| `telegram/`  | Optional bot — shares `**AureyServiceState**` with HTTP                                       |
+
+
+### Develop & test
 
 ```bash
 uv run ruff check src tests
 uv run pytest
 ```
 
+For integration tests **without live models**, inject `state=` into `**create_fastapi_application`** or patch `**create_aurey_deep_agent**` (see codebase tests).
+
+---
+
+## 🏛️ Part of **Agentic Pantheon** 
+
+**[Agentic Pantheon](https://github.com/agentic-pantheon)** is the security-first ecosystem for autonomous systems — where **LangChain**, **1Claw**, and opinionated repos meet so teams ship agents that behave in production.
+
+- **THIS REPO (`aurey`)** — standalone **EVM agentic wallet** + service shell.  
+- **Organization** → explore sibling projects (**Juno**, **Mercury**, **Fabietto** and more) under **[github.com/agentic-pantheon](https://github.com/agentic-pantheon)**.
+
+If Aurey resonates, **follow the org**!!!
+
+---
+
+## 🗺 Aurey's Roadmap
+
+High-signal priorities (intent, not a promise ledger):
+
+
+| Horizon   | Themes                                                                                |
+| --------- | ------------------------------------------------------------------------------------- |
+| **Now**   | Harden onboarding (templates, presets), expand eval scenarios, docs for signing modes |
+| **Next**  | Deeper composability packs (routing, risk checks), tighter observability dashboards   |
+| **Later** | Hosted “secure agent wallet” playbook, audits, institutional deployment guides        |
+
+
+👉 **Tell us what to build next:** open **[issues](https://github.com/agentic-pantheon/aurey/issues)** with protocol or infra requirements.
+
+---
+
+## 🤝 Contributing & contact
+
+PRs welcome. Typical flow: **fork** → **branch** → `**ruff` + `pytest` green** → **PR** with motivation + test notes.
+
+**Ways to engage**
+
+- 💼 **Consulting / custom agents / protocol integrations**: reach out via the contact channel linked from your Pantheon landing page / org README (or DM the maintainers on your usual Social — point them at this repo).  
+- 💬 **Bugs / features**: **[open an issue](https://github.com/agentic-pantheon/aurey/issues/new)**.  
+- 🔐 **Responsible disclosure**: if you suspect a custody or signing integration bug, coordinate privately — **do not** file public PoCs against live keys.
+
+If Aurey removes one entire class of “we almost shipped keys” incidents for your team — **⭐ star the repo** and tell another agent engineer. That signal keeps the roadmap sharp.
