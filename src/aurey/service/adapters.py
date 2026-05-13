@@ -24,7 +24,7 @@ class UrllibHttpJsonClient(HttpJsonPort):
         url: str,
         headers: dict[str, str] | None = None,
         json_body: dict[str, Any] | list[Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | list[Any]:
         hdrs = dict(headers or {})
         data: bytes | None = None
         if json_body is not None:
@@ -56,9 +56,11 @@ class UrllibHttpJsonClient(HttpJsonPort):
             return {}
 
         decoded = json.loads(raw.decode())
-        if not isinstance(decoded, dict):
-            raise RuntimeError("HTTP JSON response body must be an object.")
-        return decoded
+        if isinstance(decoded, dict):
+            return decoded
+        if isinstance(decoded, list):
+            return decoded
+        raise RuntimeError("HTTP JSON response body must be an object or array.")
 
 
 class UrllibEvmJsonRpc(EvmJsonRpcPort):

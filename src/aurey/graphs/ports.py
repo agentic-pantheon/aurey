@@ -49,8 +49,8 @@ class HttpJsonPort(Protocol):
         url: str,
         headers: dict[str, str] | None = None,
         json_body: dict[str, Any] | list[Any] | None = None,
-    ) -> dict[str, Any]:
-        """Perform an HTTP request and return a JSON object body."""
+    ) -> dict[str, Any] | list[Any]:
+        """Perform an HTTP request and return a parsed JSON body (object or array)."""
 
 
 @runtime_checkable

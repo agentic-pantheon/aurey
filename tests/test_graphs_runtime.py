@@ -38,7 +38,7 @@ class _LifiUnauthorizedHttp(HttpJsonPort):
         url: str,
         headers: dict[str, str] | None = None,
         json_body: dict[str, Any] | list[Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | list[Any]:
         _ = method, url, headers, json_body
         raise HttpJsonRequestError(
             status_code=401,

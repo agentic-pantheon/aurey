@@ -13,12 +13,12 @@ class ScriptedHttpClient(HttpJsonPort):
 
     def __init__(
         self,
-        handlers: list[tuple[Callable[..., bool], dict[str, Any]]] | None = None,
+        handlers: list[tuple[Callable[..., bool], dict[str, Any] | list[Any]]] | None = None,
     ) -> None:
         self._handlers = list(handlers or [])
         self.calls: list[dict[str, Any]] = []
 
-    def add(self, matcher: Callable[..., bool], response: dict[str, Any]) -> None:
+    def add(self, matcher: Callable[..., bool], response: dict[str, Any] | list[Any]) -> None:
         self._handlers.append((matcher, response))
 
     def request_json(
@@ -28,11 +28,13 @@ class ScriptedHttpClient(HttpJsonPort):
         url: str,
         headers: dict[str, str] | None = None,
         json_body: dict[str, Any] | list[Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | list[Any]:
         record = {"method": method, "url": url, "headers": headers, "json_body": json_body}
         self.calls.append(record)
         for matcher, response in self._handlers:
             if matcher(method=method, url=url, headers=headers or {}, json_body=json_body):
+                if isinstance(response, list):
+                    return list(response)
                 return dict(response)
         raise AssertionError(f"No HTTP handler matched {method} {url}")
 
@@ -47,6 +49,6 @@ class FailingHttpJsonClient(HttpJsonPort):
         url: str,
         headers: dict[str, str] | None = None,
         json_body: dict[str, Any] | list[Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | list[Any]:
         _ = method, url, headers, json_body
         raise RuntimeError("injected_http_transport_failure")
