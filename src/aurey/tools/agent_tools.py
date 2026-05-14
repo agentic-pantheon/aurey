@@ -433,6 +433,21 @@ class AlchemyTransferHistoryArgs(BaseModel):
     )
 
 
+class ComputeTokenAmountFromUsdArgs(BaseModel):
+    """Map a USD sell notional to ERC-20 raw units (Alchemy price + on-chain ``decimals``)."""
+
+    chain: str = Field(min_length=1, description="Chain slug where the token and wallet live.")
+    wallet_address: str = Field(
+        min_length=1,
+        description="Wallet for price API context and optional balance check.",
+    )
+    token_address: str = Field(min_length=1, description="Sell token contract (0x).")
+    usd_notional: str = Field(
+        min_length=1,
+        description='USD notional as decimal text (e.g. "5" or "12.34").',
+    )
+
+
 class TxExecuteToolArgs(BaseModel):
     """Execute a prepared tx: simulate, policy, sign via 1Claw, broadcast."""
 
@@ -672,6 +687,39 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
 
     tools.append(alchemy_get_token_prices)
 
+    @tool(args_schema=ComputeTokenAmountFromUsdArgs)
+    def compute_token_amount_from_usd(
+        chain: str,
+        wallet_address: str,
+        token_address: str,
+        usd_notional: str,
+    ) -> dict[str, Any]:
+        """Size a **sell** in raw token units from a **USD notional** (requires ``alchemy_api_secret_path``).
+
+        Uses Alchemy spot price and on-chain ``decimals()`` with **Decimal** math server-side—prefer over
+        hand-calculating ``from_amount_wei`` when the user asks for ``$n`` worth of a token. Returns
+        ``amount_raw`` for ``swap_prepare`` / ``earn_prepare_deposit`` and ``balance_covers_notional_amount``
+        when ``balanceOf`` succeeds. Do not use ``wallet_balance_raw`` as the swap size unless the user asked
+        to sell max.
+        """
+        payload = ComputeTokenAmountFromUsdArgs(
+            chain=chain,
+            wallet_address=wallet_address,
+            token_address=token_address,
+            usd_notional=usd_notional,
+        )
+        state = alchemy_g.invoke(
+            {
+                "input": {
+                    **payload.model_dump(),
+                    "operation": "usd_notional_to_raw",
+                }
+            }
+        )
+        return _graph_payload(state)
+
+    tools.append(compute_token_amount_from_usd)
+
     @tool(args_schema=AlchemyPortfolioArgs)
     def alchemy_get_portfolio_tokens(
         chain: str,
@@ -845,6 +893,12 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         Aurey maps them to wrapped native for the relevant **from** / **to** chain before calling LiFi
         (so the model should not leave quotes as ``toToken``).
 
+        If the user asks for **\\$n worth** of the **sell** token (fiat notional only), call "
+        "**``compute_token_amount_from_usd``** and use **``amount_raw``** as ``from_amount_wei``. Do "
+        "not substitute wallet balance unless the user asked to sell **all** or **max**. If that "
+        "tool fails, fall back to **``alchemy_get_token_prices``** + ``evm_get_erc20_decimals`` with "
+        "the same floor rule; never invent prices or raw amounts.
+
         On success, call ``tx_execute(prepared_id=result['prepared_id'])``. The full LiFi
         transaction request is stored server-side so the model does not need to copy calldata.
 
@@ -912,6 +966,9 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         **Cross-chain:** when ``from_chain`` differs from the vault chain, ``requires_status_polling`` is true:
         after the first on-chain tx, use ``lifi_get_status`` with the **source** tx hash and chain hints until
         LiFi reports completion (destination funds or substatus).
+
+        For **USD notional** on the sell token, call **``compute_token_amount_from_usd``** and use
+        ``amount_raw`` as ``from_amount_wei`` (same floor/price/decimals logic as ``swap_prepare``).
 
         ENS names on **ethereum** must be resolved with ``evm_resolve_ens`` before passing addresses.
         """
@@ -1259,6 +1316,7 @@ __all__ = [
     "AlchemyPortfolioArgs",
     "AlchemyTokenPricesArgs",
     "AlchemyTransferHistoryArgs",
+    "ComputeTokenAmountFromUsdArgs",
     "EarnGetVaultArgs",
     "EarnListChainsArgs",
     "EarnListProtocolsArgs",

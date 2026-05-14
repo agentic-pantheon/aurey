@@ -96,6 +96,30 @@ class AlchemyTokenPricesResult(BaseModel):
     prices_by_address: dict[str, str]
 
 
+class UsdNotionalToTokenRawResult(BaseModel):
+    """Sell-token raw amount from a USD notional using a live price and on-chain ``decimals()``."""
+
+    model_config = ConfigDict(frozen=True)
+
+    chain: str
+    chain_id: int
+    wallet_address: str
+    token_address: str
+    usd_notional: str
+    price_usd: str
+    decimals: int = Field(ge=0, le=255)
+    human_token_amount: str
+    amount_raw: str = Field(pattern=r"^[0-9]+$")
+    wallet_balance_raw: str | None = Field(
+        default=None,
+        description="Current ``balanceOf(wallet)`` when the RPC read succeeded.",
+    )
+    balance_covers_notional_amount: bool | None = Field(
+        default=None,
+        description="True iff ``wallet_balance_raw >= amount_raw`` when both are known.",
+    )
+
+
 class AlchemyPortfolioResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 

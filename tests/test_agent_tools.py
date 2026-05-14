@@ -95,6 +95,7 @@ def test_tool_schemas_include_expected_names_and_descriptions():
         "resolve_known_address",
         "evm_get_erc20_balance",
         "alchemy_get_token_prices",
+        "compute_token_amount_from_usd",
         "alchemy_get_portfolio_tokens",
         "alchemy_get_transfer_history",
         "earn_list_chains",

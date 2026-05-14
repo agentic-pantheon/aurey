@@ -78,6 +78,43 @@
     "title": "AlchemyTransferHistoryArgs",
     "type": "object"
   },
+  "compute_token_amount_from_usd": {
+    "description": "Map a USD sell notional to ERC-20 raw units (Alchemy price + on-chain ``decimals``).",
+    "properties": {
+      "chain": {
+        "description": "Chain slug where the token and wallet live.",
+        "minLength": 1,
+        "title": "Chain",
+        "type": "string"
+      },
+      "token_address": {
+        "description": "Sell token contract (0x).",
+        "minLength": 1,
+        "title": "Token Address",
+        "type": "string"
+      },
+      "usd_notional": {
+        "description": "USD notional as decimal text (e.g. \"5\" or \"12.34\").",
+        "minLength": 1,
+        "title": "Usd Notional",
+        "type": "string"
+      },
+      "wallet_address": {
+        "description": "Wallet for price API context and optional balance check.",
+        "minLength": 1,
+        "title": "Wallet Address",
+        "type": "string"
+      }
+    },
+    "required": [
+      "chain",
+      "wallet_address",
+      "token_address",
+      "usd_notional"
+    ],
+    "title": "ComputeTokenAmountFromUsdArgs",
+    "type": "object"
+  },
   "earn_get_vault": {
     "additionalProperties": false,
     "description": "Fetch one Earn vault by chain + contract; use before ``earn_prepare_deposit`` to validate metadata.",

@@ -10,6 +10,7 @@ Transfers JSON-RPC:
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any, Literal, TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -20,14 +21,22 @@ from aurey.custody.errors import (
     SecretStoreUnavailableError,
     secret_unavailable_graph_details,
 )
-from aurey.graphs.chains import chain_info
+from aurey.graphs.chains import chain_id_for, chain_info
 from aurey.graphs.checkpoint_serde import uint256_checkpoint_str
-from aurey.graphs.evm_codec import format_token_units, normalize_evm_address, parse_evm_uint
+from aurey.graphs.evm_codec import (
+    ERC20_DECIMALS_CALLDATA,
+    decode_abi_uint256_word,
+    erc20_balance_of_calldata,
+    format_token_units,
+    normalize_evm_address,
+    parse_evm_uint,
+)
 from aurey.graphs.results import (
     AlchemyPortfolioResult,
     AlchemyTokenPricesResult,
     AlchemyTransferHistoryResult,
     GraphErrorBody,
+    UsdNotionalToTokenRawResult,
 )
 from aurey.runtime import AureyRuntime
 
@@ -38,10 +47,23 @@ def _alchemy_network(chain: str) -> str | None:
 
 
 class AlchemyGraphInput(BaseModel):
-    operation: Literal["token_prices", "portfolio_tokens", "transfer_history"]
+    operation: Literal[
+        "token_prices",
+        "portfolio_tokens",
+        "transfer_history",
+        "usd_notional_to_raw",
+    ]
     chain: str = Field(min_length=1)
     wallet_address: str = Field(min_length=1)
     token_addresses: list[str] | None = None
+    token_address: str | None = Field(
+        default=None,
+        description="ERC-20 contract (sell token) for usd_notional_to_raw.",
+    )
+    usd_notional: str | None = Field(
+        default=None,
+        description='USD notional as decimal text (e.g. "5" or "5.00") for usd_notional_to_raw.',
+    )
 
 
 class AlchemyGraphState(TypedDict, total=False):
@@ -89,6 +111,47 @@ def _validate_node(state: AlchemyGraphState) -> AlchemyGraphState:
                 "error": GraphErrorBody(
                     code="invalid_input",
                     message="token_addresses is required for token_prices.",
+                ).model_dump()
+            }
+    if parsed.operation == "usd_notional_to_raw":
+        if not parsed.token_address or not str(parsed.token_address).strip():
+            return {
+                "error": GraphErrorBody(
+                    code="invalid_input",
+                    message="token_address is required for usd_notional_to_raw.",
+                ).model_dump()
+            }
+        if not parsed.usd_notional or not str(parsed.usd_notional).strip():
+            return {
+                "error": GraphErrorBody(
+                    code="invalid_input",
+                    message="usd_notional is required for usd_notional_to_raw.",
+                ).model_dump()
+            }
+        try:
+            normalize_evm_address(parsed.token_address)
+        except ValueError as exc:
+            return {
+                "error": GraphErrorBody(
+                    code="invalid_input",
+                    message="Invalid token_address.",
+                    details={"reason": str(exc)},
+                ).model_dump()
+            }
+        try:
+            usd_d = Decimal(str(parsed.usd_notional).strip())
+        except InvalidOperation:
+            return {
+                "error": GraphErrorBody(
+                    code="invalid_input",
+                    message="usd_notional must be a positive decimal number.",
+                ).model_dump()
+            }
+        if usd_d <= 0:
+            return {
+                "error": GraphErrorBody(
+                    code="invalid_input",
+                    message="usd_notional must be positive.",
                 ).model_dump()
             }
     return {}
@@ -171,6 +234,39 @@ def _parse_prices_payload(payload: dict[str, Any], token_addrs: list[str]) -> di
             out[addr] = price
 
     return out
+
+
+def _decimal_plain_str(d: Decimal) -> str:
+    s = format(d, "f")
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s or "0"
+
+
+def _raw_amount_from_usd_notional(
+    *,
+    usd_notional: str,
+    price_usd_str: str,
+    decimals: int,
+) -> tuple[int, Decimal]:
+    if price_usd_str.strip().startswith("<error:"):
+        raise ValueError("token price unavailable from Alchemy")
+    usd = Decimal(str(usd_notional).strip())
+    price = Decimal(str(price_usd_str).strip())
+    if price <= 0:
+        raise ValueError("non-positive token price")
+    if usd <= 0:
+        raise ValueError("non-positive usd notional")
+    human = usd / price
+    scale = Decimal(10) ** decimals
+    raw_dec = (human * scale).to_integral_value(rounding=ROUND_DOWN)
+    if raw_dec <= 0:
+        raise ValueError(
+            "usd_notional rounds to zero token base units at this price; increase USD amount."
+        )
+    if raw_dec > Decimal(2**256 - 1):
+        raise ValueError("computed raw amount exceeds uint256")
+    return int(raw_dec), human
 
 
 def _coerce_decimals(value: Any) -> int | None:
@@ -356,6 +452,97 @@ def _execute_node(runtime: AureyRuntime, state: AlchemyGraphState) -> AlchemyGra
             )
             tokens = _parse_portfolio_tokens(payload if isinstance(payload, dict) else {})
             result = AlchemyPortfolioResult(chain=chain, wallet_address=wallet, tokens=tokens)
+            return {"result": result.model_dump()}
+
+        if parsed.operation == "usd_notional_to_raw":
+            token = normalize_evm_address(parsed.token_address or "")
+            rpc_url = f"https://{network}.g.alchemy.com/v2/{api_key}"
+            rpc = runtime.evm_rpc_factory(rpc_url)
+            try:
+                raw_decimals = rpc.call(
+                    "eth_call",
+                    [{"to": token, "data": ERC20_DECIMALS_CALLDATA}, "latest"],
+                )
+                if not isinstance(raw_decimals, str):
+                    raise TypeError("unexpected eth_call result type")
+                dec_val = decode_abi_uint256_word(raw_decimals)
+                if dec_val > 255:
+                    raise ValueError("decimals out of range")
+            except Exception:
+                return {
+                    "error": GraphErrorBody(
+                        code="rpc_error",
+                        message="RPC eth_call for ERC-20 decimals() failed.",
+                        details={"token_address": token},
+                    ).model_dump()
+                }
+
+            url = f"https://api.g.alchemy.com/prices/v1/{api_key}/tokens/by-address"
+            payload = runtime.http.request_json(
+                method="POST",
+                url=url,
+                headers=hdr_json,
+                json_body={"addresses": [{"network": network, "address": token}]},
+            )
+            if not isinstance(payload, dict):
+                raise ValueError("unexpected prices envelope")
+            prices = _parse_prices_payload(payload, [token])
+            price_str = prices.get(token)
+            if price_str is None:
+                return {
+                    "error": GraphErrorBody(
+                        code="http_error",
+                        message="No price returned for token.",
+                        details={"token_address": token},
+                    ).model_dump()
+                }
+
+            usd_s = str(parsed.usd_notional).strip()
+            try:
+                amount_raw_int, human = _raw_amount_from_usd_notional(
+                    usd_notional=usd_s,
+                    price_usd_str=price_str,
+                    decimals=int(dec_val),
+                )
+            except ValueError as exc:
+                return {
+                    "error": GraphErrorBody(
+                        code="invalid_input",
+                        message=str(exc),
+                    ).model_dump()
+                }
+
+            bal_raw: int | None = None
+            try:
+                bal_data = erc20_balance_of_calldata(wallet)
+                bal_out = rpc.call(
+                    "eth_call", [{"to": token, "data": bal_data}, "latest"]
+                )
+                if isinstance(bal_out, str):
+                    bal_raw = decode_abi_uint256_word(bal_out)
+            except Exception:
+                bal_raw = None
+
+            bal_str = str(bal_raw) if bal_raw is not None else None
+            covers: bool | None = (
+                bal_raw >= amount_raw_int if bal_raw is not None else None
+            )
+            cid = chain_id_for(chain)
+            assert cid is not None
+            usd_norm = _decimal_plain_str(Decimal(usd_s))
+            result = UsdNotionalToTokenRawResult(
+                chain=chain,
+                chain_id=cid,
+                wallet_address=wallet,
+                token_address=token,
+                usd_notional=usd_norm,
+                price_usd=price_str,
+                decimals=int(dec_val),
+                human_token_amount=_decimal_plain_str(human),
+                amount_raw=str(amount_raw_int),
+                wallet_balance_raw=bal_str,
+                balance_covers_notional_amount=covers,
+            )
             return {"result": result.model_dump()}
 
         rpc_url = f"https://{network}.g.alchemy.com/v2/{api_key}"

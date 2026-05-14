@@ -404,6 +404,88 @@ def test_alchemy_token_prices_graph():
     _assert_no_banned_values(out)
 
 
+def test_alchemy_usd_notional_to_raw_graph():
+    """$5 at $80k/BTC with 8 decimals rounds down to 6250 raw; includes balance check."""
+
+    secrets = {"vault/alchemy": "INJECTED_ALCHEMY_KEY_AAA"}
+    settings = AureySettings(alchemy_api_secret_path="vault/alchemy")
+    wallet = "0x4444444444444444444444444444444444444444"
+    tok = "0x2222222222222222222222222222222222222222"
+
+    def match_prices(**kw: object) -> bool:
+        if kw.get("method") != "POST":
+            return False
+        url = str(kw.get("url") or "")
+        if "/prices/v1/" not in url or "tokens/by-address" not in url:
+            return False
+        body = kw.get("json_body") or {}
+        addrs = body.get("addresses") if isinstance(body, dict) else None
+        return (
+            isinstance(addrs, list)
+            and len(addrs) == 1
+            and addrs[0].get("address", "").lower() == tok.lower()
+        )
+
+    def eth_call(params: list) -> str:
+        data = params[0]["data"].lower()
+        if data.startswith("0x313ce567"):
+            return "0x0000000000000000000000000000000000000000000000000000000000000008"
+        if data.startswith("0x70a08231"):
+            return "0x000000000000000000000000000000000000000000000000000000000000f4de"
+        raise AssertionError(f"unexpected eth_call {data[:12]}")
+
+    http = ScriptedHttpClient(
+        [
+            (
+                match_prices,
+                {
+                    "data": [
+                        {
+                            "network": "base-mainnet",
+                            "address": tok.lower(),
+                            "prices": [
+                                {
+                                    "currency": "USD",
+                                    "value": "80000",
+                                    "lastUpdatedAt": "2025-01-01T00:00:00Z",
+                                }
+                            ],
+                            "error": None,
+                        }
+                    ],
+                },
+            ),
+        ]
+    )
+    runtime = _runtime(
+        secrets=secrets,
+        settings=settings,
+        http=http,
+        rpc_map={"eth_call": eth_call},
+    )
+    out = build_alchemy_graph(runtime).invoke(
+        {
+            "input": {
+                "operation": "usd_notional_to_raw",
+                "chain": "base",
+                "wallet_address": wallet,
+                "token_address": tok,
+                "usd_notional": "5",
+            }
+        }
+    )
+    assert out.get("error") is None
+    res = out["result"]
+    assert res["amount_raw"] == "6250"
+    assert res["human_token_amount"] == "0.0000625"
+    assert res["decimals"] == 8
+    assert res["price_usd"] == "80000"
+    assert res["usd_notional"] == "5"
+    assert res["wallet_balance_raw"] == "62686"
+    assert res["balance_covers_notional_amount"] is True
+    _assert_no_banned_values(out)
+
+
 def test_alchemy_portfolio_and_transfers_graphs():
     secrets = {"vault/alchemy": "INJECTED_ALCHEMY_KEY_AAA"}
     settings = AureySettings(alchemy_api_secret_path="vault/alchemy")

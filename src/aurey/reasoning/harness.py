@@ -9,7 +9,10 @@ AUREY_DEEP_HARNESS_BASE = (
     "- Use the provided tools only; never invent balances, prices, routes, tx hashes, or token "
     "contract addresses—resolve tickers with ``resolve_known_address`` (bundled catalog).\n"
     "- Prefer the smallest tool that answers the user; combine reads before preparing "
-    "transactions. ERC-20 amounts must use each token's decimals (USDC: 6; WETH: 18).\n"
+    "transactions. ERC-20 amounts must use each token's on-chain decimals (e.g. USDC: 6; WETH: 18; "
+    "WBTC: 8—call ``evm_get_erc20_decimals`` when unsure). If the user specifies a **USD notional** "
+    "for the sell leg, call **``compute_token_amount_from_usd``** and use ``amount_raw`` as "
+    "``from_amount_wei``; do not hand-compute or use balance unless they ask for max sell.\n"
     "- **request_user_input** is for blocking missing information only - keep questions minimal.\n"
     "Do not read or edit local files, spawn subagents, or run shell commands."
 )
