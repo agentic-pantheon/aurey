@@ -9,7 +9,11 @@ from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, ValidationError
 
 from aurey.custody import OneClawEvmTransactionSigner
-from aurey.custody.errors import SecretNotFoundError, SecretStoreUnavailableError
+from aurey.custody.errors import (
+    SecretNotFoundError,
+    SecretStoreUnavailableError,
+    secret_unavailable_graph_details,
+)
 from aurey.graphs.ports import TxPipelinePort
 from aurey.graphs.results import (
     GraphErrorBody,
@@ -97,12 +101,12 @@ def _execute_node(runtime: AureyRuntime, state: TxExecuteGraphState) -> TxExecut
                     details={"secret_kind": "signing_key"},
                 ).model_dump()
             }
-        except SecretStoreUnavailableError:
+        except SecretStoreUnavailableError as exc:
             return {
                 "error": GraphErrorBody(
                     code="secret_unavailable",
                     message="Secret store unavailable while resolving signing material.",
-                    details={"secret_kind": "signing_key"},
+                    details=secret_unavailable_graph_details(secret_kind="signing_key", exc=exc),
                 ).model_dump()
             }
 

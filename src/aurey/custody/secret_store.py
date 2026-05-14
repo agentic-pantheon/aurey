@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
@@ -15,6 +17,8 @@ from aurey.custody.errors import (
     SecretNotFoundError,
     SecretStoreUnavailableError,
 )
+
+_log = logging.getLogger(__name__)
 
 
 def _http_error_snippet(exc: HTTPError, *, max_len: int = 800) -> str:
@@ -175,6 +179,13 @@ class OneClawSecretStore:
             raise ValueError("Secret path must not be empty.")
 
         try:
+            aid = self._agent_id.strip() if self._agent_id and str(self._agent_id).strip() else None
+            _log.info(
+                "SecretStore issuing 1Claw read vault_id=%s secret_path=%s agent_id=%s",
+                self._vault_id,
+                path.strip(),
+                aid or "(legacy resolve; no agent id)",
+            )
             value = self._client.get_secret(
                 vault_id=self._vault_id,
                 path=path,
@@ -205,9 +216,20 @@ class OneClawHttpClient:
 
     When ``agent_id`` is omitted, uses legacy ``POST .../secrets:resolve`` with the API key
     as the bearer token (for older or self-hosted deployments).
+
+    Agent JWTs from ``POST /v1/auth/agent-token`` are cached and reused (per 1Claw guidance to
+    refresh before expiry, not on every request). If the response includes ``expires_in`` seconds,
+    the client refreshes after ``expires_in - agent_token_expiry_skew_seconds`` to avoid edge
+    expiry; if ``expires_in`` is absent, the token is kept until the API returns 401.
     """
 
-    def __init__(self, *, base_url: str, api_key: str) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        agent_token_expiry_skew_seconds: float = 60.0,
+    ) -> None:
         if not base_url.strip():
             raise ValueError("1Claw base URL must not be empty.")
         if not api_key.strip():
@@ -215,24 +237,45 @@ class OneClawHttpClient:
 
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
+        self._agent_token_expiry_skew_seconds = max(0.0, float(agent_token_expiry_skew_seconds))
         self._access_token: str | None = None
         self._access_token_agent: str | None = None
+        self._access_token_expires_at: float | None = None
 
     def get_secret(self, *, vault_id: str, path: str, agent_id: str | None = None) -> str:
         """Read a secret value from 1Claw without exposing it in errors."""
 
         agent = agent_id.strip() if agent_id and agent_id.strip() else None
         if agent is not None:
+            _log.info(
+                "1Claw hosted secret flow base_url=%s vault_id=%s secret_path=%s agent_id=%s",
+                self._base_url,
+                vault_id,
+                path.strip(),
+                agent,
+            )
             return self._get_secret_hosted(vault_id=vault_id, path=path, agent_id=agent)
+        _log.info(
+            "1Claw legacy secrets:resolve base_url=%s vault_id=%s secret_path=%s",
+            self._base_url,
+            vault_id,
+            path.strip(),
+        )
         return self._get_secret_legacy_resolve(vault_id=vault_id, path=path)
 
     def _invalidate_access_token(self, agent_id: str) -> None:
         if self._access_token_agent == agent_id:
             self._access_token = None
             self._access_token_agent = None
+            self._access_token_expires_at = None
 
     def _fetch_access_token(self, agent_id: str) -> str:
         url = f"{self._base_url}/v1/auth/agent-token"
+        _log.info(
+            "1Claw requesting agent access token POST %s agent_id=%s (credentials not logged)",
+            url,
+            agent_id,
+        )
         body = json.dumps({"agent_id": agent_id, "api_key": self._api_key}).encode("utf-8")
         request = Request(
             url,
@@ -244,6 +287,13 @@ class OneClawHttpClient:
             with urlopen(request, timeout=10) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
+            _log.warning(
+                "1Claw POST agent-token failed HTTP %s url=%s agent_id=%s response_body_preview=%s",
+                exc.code,
+                url,
+                agent_id,
+                _http_error_snippet(exc, max_len=240),
+            )
             raise SecretStoreUnavailableError(
                 "/v1/auth/agent-token",
                 store_name="1Claw",
@@ -254,6 +304,12 @@ class OneClawHttpClient:
                 ),
             ) from exc
         except (OSError, URLError, json.JSONDecodeError) as exc:
+            _log.warning(
+                "1Claw POST agent-token failed (network/json) url=%s agent_id=%s err=%s",
+                url,
+                agent_id,
+                type(exc).__name__,
+            )
             raise SecretStoreUnavailableError(
                 "/v1/auth/agent-token",
                 store_name="1Claw",
@@ -273,11 +329,36 @@ class OneClawHttpClient:
 
         self._access_token = token.strip()
         self._access_token_agent = agent_id
+        expires_raw = payload.get("expires_in")
+        if isinstance(expires_raw, (int, float)) and float(expires_raw) > 0:
+            ttl = float(expires_raw) - self._agent_token_expiry_skew_seconds
+            self._access_token_expires_at = time.monotonic() + max(0.0, ttl)
+        else:
+            self._access_token_expires_at = None
+        _log.info(
+            "1Claw agent access token cached for agent_id=%s (value not logged; expires_in-based "
+            "refresh=%s)",
+            agent_id,
+            "yes" if self._access_token_expires_at is not None else "no (refresh on 401 only)",
+        )
         return self._access_token
 
     def _bearer_for_agent(self, agent_id: str) -> str:
         if self._access_token and self._access_token_agent == agent_id:
-            return self._access_token
+            if (
+                self._access_token_expires_at is not None
+                and time.monotonic() >= self._access_token_expires_at
+            ):
+                _log.info(
+                    "1Claw cached agent token past expires_in window (skew=%ss); refreshing "
+                    "agent_id=%s",
+                    self._agent_token_expiry_skew_seconds,
+                    agent_id,
+                )
+                self._invalidate_access_token(agent_id)
+            else:
+                _log.debug("1Claw reusing cached access token agent_id=%s", agent_id)
+                return self._access_token
         return self._fetch_access_token(agent_id)
 
     def _secret_url_path_suffix(self, path: str) -> str:
@@ -311,6 +392,12 @@ class OneClawHttpClient:
     def _http_get_secret_value(self, vault_id: str, path: str, bearer: str) -> str:
         suffix = self._secret_url_path_suffix(path)
         url = f"{self._base_url}/v1/vaults/{vault_id}/secrets/{suffix}"
+        _log.info(
+            "1Claw GET secret (Authorization bearer redacted) url=%s vault_id=%s logical_path=%s",
+            url,
+            vault_id,
+            path.strip(),
+        )
         request = Request(
             url,
             headers={"Authorization": f"Bearer {bearer}"},
@@ -319,9 +406,24 @@ class OneClawHttpClient:
         try:
             with urlopen(request, timeout=10) as response:
                 response_payload = json.loads(response.read().decode("utf-8"))
-        except HTTPError:
+        except HTTPError as exc:
+            _log.warning(
+                "1Claw GET secret HTTP %s vault_id=%s logical_path=%s url=%s response_body_preview=%s",
+                exc.code,
+                vault_id,
+                path.strip(),
+                url,
+                _http_error_snippet(exc, max_len=240),
+            )
             raise
         except (OSError, URLError, json.JSONDecodeError) as exc:
+            _log.warning(
+                "1Claw GET secret failed vault_id=%s logical_path=%s url=%s err=%s",
+                vault_id,
+                path.strip(),
+                url,
+                type(exc).__name__,
+            )
             raise SecretStoreUnavailableError(path, store_name="1Claw") from exc
 
         value = _extract_secret_value(response_payload)
@@ -331,6 +433,12 @@ class OneClawHttpClient:
 
     def _get_secret_legacy_resolve(self, *, vault_id: str, path: str) -> str:
         url = f"{self._base_url}/v1/vaults/{vault_id}/secrets:resolve"
+        _log.info(
+            "1Claw POST secrets:resolve (authorization header redacted) url=%s vault_id=%s body_path=%s",
+            url,
+            vault_id,
+            path.strip(),
+        )
         payload = json.dumps({"path": path}).encode("utf-8")
         request = Request(
             url,
@@ -346,10 +454,25 @@ class OneClawHttpClient:
             with urlopen(request, timeout=10) as response:
                 response_payload = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
+            _log.warning(
+                "1Claw POST secrets:resolve HTTP %s vault_id=%s path=%s url=%s response_body_preview=%s",
+                exc.code,
+                vault_id,
+                path.strip(),
+                url,
+                _http_error_snippet(exc, max_len=240),
+            )
             if exc.code == 404:
                 raise SecretNotFoundError(path) from exc
             raise SecretStoreUnavailableError(path, store_name="1Claw") from exc
         except (OSError, URLError, json.JSONDecodeError) as exc:
+            _log.warning(
+                "1Claw POST secrets:resolve failed vault_id=%s path=%s url=%s err=%s",
+                vault_id,
+                path.strip(),
+                url,
+                type(exc).__name__,
+            )
             raise SecretStoreUnavailableError(path, store_name="1Claw") from exc
 
         value = _extract_secret_value(response_payload)

@@ -37,7 +37,11 @@ def bootstrap_aurey_service_state(settings: AureySettings | None = None) -> Aure
             "Bootstrap 1Claw API key configuration is invalid."
         ) from None
 
-    client = OneClawHttpClient(base_url=s.oneclaw_base_url.strip(), api_key=api_key)
+    client = OneClawHttpClient(
+        base_url=s.oneclaw_base_url.strip(),
+        api_key=api_key,
+        agent_token_expiry_skew_seconds=s.oneclaw_agent_token_expiry_skew_seconds,
+    )
     store = OneClawSecretStore(client=client, vault_id=vault_id, agent_id=s.oneclaw_agent_id)
 
     runtime = AureyRuntime(

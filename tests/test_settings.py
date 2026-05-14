@@ -25,6 +25,7 @@ def test_settings_defaults():
     assert s.telegram_allowed_chat_id_allowlist is None
     assert s.deep_agent_default_model == "openai:gpt-4o-mini"
     assert s.database_url is None
+    assert s.oneclaw_agent_token_expiry_skew_seconds == 60.0
 
 
 def test_settings_env_override(monkeypatch):

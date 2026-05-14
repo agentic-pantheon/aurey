@@ -66,6 +66,7 @@ def test_oneclaw_secret_store_wraps_unexpected_exceptions():
         store.get_secret("any/path")
     assert exc.value.store_name == "1Claw"
     assert exc.value.path == "any/path"
+    assert exc.value.detail is None
 
 
 def test_oneclaw_secret_store_requires_vault_id():

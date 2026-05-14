@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import json
 from collections.abc import Callable
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError
 from urllib.request import Request
 
@@ -249,3 +249,68 @@ def test_oneclaw_http_sign_maps_missing_signed_tx_to_signing_error():
         client = OneClawHttpClient(base_url="https://claw.test", api_key="k")
         with pytest.raises(OneClawSigningError):
             client.sign_evm_transaction(agent_id="a", chain="eth", transaction={})
+
+
+def test_oneclaw_http_get_secret_reuses_token_until_expires_in_window():
+    captured: list[Request] = []
+    actions = [
+        json.dumps({"access_token": "jwt-a", "expires_in": 3600}).encode(),
+        json.dumps({"value": "one"}).encode(),
+        json.dumps({"value": "two"}).encode(),
+    ]
+    mono = MagicMock(side_effect=[1000.0, 1001.0])
+    with (
+        patch(
+            "aurey.custody.secret_store.urlopen",
+            side_effect=_make_urlopen_mock(actions, captured),
+        ),
+        patch("aurey.custody.secret_store.time.monotonic", mono),
+    ):
+        client = OneClawHttpClient(
+            base_url="https://claw.test",
+            api_key="k",
+            agent_token_expiry_skew_seconds=60.0,
+        )
+        assert client.get_secret(vault_id="v1", path="a/b", agent_id="agent-1") == "one"
+        assert client.get_secret(vault_id="v1", path="a/c", agent_id="agent-1") == "two"
+
+    assert len(captured) == 3
+    assert json.loads(captured[0].data.decode()) == {"agent_id": "agent-1", "api_key": "k"}
+    auths = [
+        next(v for h, v in r.header_items() if h.lower() == "authorization") for r in captured[1:]
+    ]
+    assert auths == ["Bearer jwt-a", "Bearer jwt-a"]
+    assert mono.call_count == 2
+
+
+def test_oneclaw_http_get_secret_refetches_token_after_expires_in_window():
+    captured: list[Request] = []
+    actions = [
+        json.dumps({"access_token": "jwt-old", "expires_in": 100}).encode(),
+        json.dumps({"value": "one"}).encode(),
+        json.dumps({"access_token": "jwt-new", "expires_in": 100}).encode(),
+        json.dumps({"value": "two"}).encode(),
+    ]
+    skew = 60.0
+    mono = MagicMock(side_effect=[1000.0, 2000.0, 2000.0])
+    with (
+        patch(
+            "aurey.custody.secret_store.urlopen",
+            side_effect=_make_urlopen_mock(actions, captured),
+        ),
+        patch("aurey.custody.secret_store.time.monotonic", mono),
+    ):
+        client = OneClawHttpClient(
+            base_url="https://claw.test",
+            api_key="k",
+            agent_token_expiry_skew_seconds=skew,
+        )
+        assert client.get_secret(vault_id="v1", path="a/b", agent_id="agent-1") == "one"
+        assert client.get_secret(vault_id="v1", path="a/c", agent_id="agent-1") == "two"
+
+    assert len(captured) == 4
+    auth1 = next(v for h, v in captured[1].header_items() if h.lower() == "authorization")
+    auth3 = next(v for h, v in captured[3].header_items() if h.lower() == "authorization")
+    assert auth1 == "Bearer jwt-old"
+    assert auth3 == "Bearer jwt-new"
+    assert mono.call_count == 3

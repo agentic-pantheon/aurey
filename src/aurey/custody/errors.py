@@ -1,5 +1,9 @@
 """Sanitized custody-layer exceptions."""
 
+from __future__ import annotations
+
+from typing import Any
+
 
 class CustodyError(RuntimeError):
     """Base class for custody and secret-store failures."""
@@ -41,7 +45,23 @@ class SecretStoreUnavailableError(SecretStoreError):
     ) -> None:
         self.path = path
         self.store_name = store_name
+        self.detail = detail
         if detail is not None:
             super().__init__(f"{store_name}: {detail}")
         else:
             super().__init__(f"{store_name} could not resolve secret path '{path}'.")
+
+
+def secret_unavailable_graph_details(
+    *,
+    secret_kind: str,
+    exc: SecretStoreUnavailableError,
+) -> dict[str, Any]:
+    """Stable GraphError ``details`` for :class:`SecretStoreUnavailableError` (no secret values)."""
+
+    return {
+        "secret_kind": secret_kind,
+        "path": exc.path,
+        "store": exc.store_name,
+        "detail": exc.detail if exc.detail is not None else str(exc),
+    }

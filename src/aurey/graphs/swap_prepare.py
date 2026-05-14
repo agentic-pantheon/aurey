@@ -10,7 +10,11 @@ from urllib.parse import urlencode
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field, ValidationError
 
-from aurey.custody.errors import SecretNotFoundError, SecretStoreUnavailableError
+from aurey.custody.errors import (
+    SecretNotFoundError,
+    SecretStoreUnavailableError,
+    secret_unavailable_graph_details,
+)
 from aurey.graphs.chains import chain_id_for, chain_info
 from aurey.graphs.evm_codec import (
     decode_abi_uint256_word,
@@ -127,11 +131,11 @@ def _resolve_lifi_key(runtime: AureyRuntime) -> tuple[str | None, dict[str, Any]
             details={"secret_kind": "lifi_api"},
         ).model_dump()
         return None, err
-    except SecretStoreUnavailableError:
+    except SecretStoreUnavailableError as exc:
         err = GraphErrorBody(
             code="secret_unavailable",
             message="Secret store unavailable while resolving LiFi API key.",
-            details={"secret_kind": "lifi_api"},
+            details=secret_unavailable_graph_details(secret_kind="lifi_api", exc=exc),
         ).model_dump()
         return None, err
 

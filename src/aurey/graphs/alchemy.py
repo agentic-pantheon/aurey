@@ -15,7 +15,11 @@ from typing import Any, Literal, TypedDict
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field, ValidationError
 
-from aurey.custody.errors import SecretNotFoundError, SecretStoreUnavailableError
+from aurey.custody.errors import (
+    SecretNotFoundError,
+    SecretStoreUnavailableError,
+    secret_unavailable_graph_details,
+)
 from aurey.graphs.chains import chain_info
 from aurey.graphs.checkpoint_serde import uint256_checkpoint_str
 from aurey.graphs.evm_codec import format_token_units, normalize_evm_address, parse_evm_uint
@@ -107,11 +111,11 @@ def _resolve_alchemy_key(runtime: AureyRuntime) -> tuple[str | None, dict[str, A
             details={"secret_kind": "alchemy_api"},
         ).model_dump()
         return None, err
-    except SecretStoreUnavailableError:
+    except SecretStoreUnavailableError as exc:
         err = GraphErrorBody(
             code="secret_unavailable",
             message="Secret store unavailable while resolving Alchemy API key.",
-            details={"secret_kind": "alchemy_api"},
+            details=secret_unavailable_graph_details(secret_kind="alchemy_api", exc=exc),
         ).model_dump()
         return None, err
 

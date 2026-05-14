@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, quote, urlparse
 import ormsgpack
 
 from aurey.custody import FakeOneClawClient, FakeSecretStore, OneClawEvmTransactionSigner
+from aurey.custody.errors import SecretStoreUnavailableError
 from aurey.graphs import (
     DeterministicTxPipeline,
     build_alchemy_graph,
@@ -81,6 +82,15 @@ class _EarnHttpJsonError(HttpJsonPort):
         )
 
 
+class _UnavailableSigningKeyStore:
+    def get_secret(self, path: str):
+        raise SecretStoreUnavailableError(
+            "/v1/auth/agent-token",
+            store_name="1Claw",
+            detail="Agent token exchange failed with HTTP 401. Check agent id and bootstrap API key.",
+        )
+
+
 def _runtime(
     *,
     secrets: dict[str, str],
@@ -88,10 +98,12 @@ def _runtime(
     http: HttpJsonPort,
     rpc_map: dict[str, object],
     oneclaw_evm_signer: OneClawEvmTransactionSigner | None = None,
+    secret_store: Any | None = None,
 ) -> AureyRuntime:
+    store = secret_store if secret_store is not None else FakeSecretStore(secrets)
     return AureyRuntime(
         settings=settings,
-        secret_store=FakeSecretStore(secrets),
+        secret_store=store,
         evm_rpc_factory=rpc_factory_from_mapping(rpc_map),
         http=http,
         tx_pipeline=DeterministicTxPipeline(),
@@ -1146,6 +1158,40 @@ def test_tx_execute_simulation_failure():
     assert out.get("result") is None
     assert out["error"]["code"] == "simulation_failed"
     assert "simulation_failed" in out["error"]["message"]
+
+
+def test_tx_execute_secret_unavailable_surfaces_store_detail():
+    signing_path = "vault/signing/local"
+    settings = AureySettings(
+        evm_signing_mode="vault_key",
+        wallet_signing_key_secret_path=signing_path,
+    )
+    runtime = _runtime(
+        secrets={},
+        settings=settings,
+        http=ScriptedHttpClient(),
+        rpc_map={},
+        secret_store=_UnavailableSigningKeyStore(),
+    )
+    envelope = {
+        "kind": "native_transfer",
+        "chain_id": 1,
+        "from_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "to": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "data": "0x",
+        "value_hex": "0x1",
+        "gas_limit_hex": None,
+        "nonce": None,
+        "signing_mode": "vault_key",
+        "signing_key_secret_path": signing_path,
+    }
+    out = build_tx_execute_graph(runtime).invoke({"input": {"envelope": envelope}})
+    assert out.get("result") is None
+    assert out["error"]["code"] == "secret_unavailable"
+    details = out["error"]["details"]
+    assert details["secret_kind"] == "signing_key"
+    assert details["path"] == "/v1/auth/agent-token"
+    assert "401" in details["detail"]
 
 
 def test_tx_prepare_and_execute_oneclaw_intents_roundtrip():

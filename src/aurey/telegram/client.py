@@ -241,9 +241,7 @@ def resolve_telegram_bot_token(state: AureyServiceState) -> str:
         raise TelegramConfigurationError("Telegram bot token could not be resolved.") from exc
     except SecretStoreUnavailableError as exc:
         raise TelegramConfigurationError(
-            f"Secret store unavailable for Telegram token at path {path!r}. "
-            "If this path is correct, the failure may be 1Claw agent authentication "
-            "(POST /v1/auth/agent-token) rather than the Telegram secret; see chained error."
+            f"Secret store unavailable for Telegram token at path {path!r}. ({exc})"
         ) from exc
 
 

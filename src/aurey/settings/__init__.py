@@ -73,6 +73,15 @@ class AureySettings(BaseSettings):
         default=None,
         description="Optional agent id for hosted token exchange flow.",
     )
+    oneclaw_agent_token_expiry_skew_seconds: float = Field(
+        default=60.0,
+        ge=0.0,
+        description=(
+            "Seconds before 1Claw JWT ``expires_in`` deadline to drop the cached token and call "
+            "``POST /v1/auth/agent-token`` again (avoids expiry mid-request; 0 disables skew only "
+            "when expiry is known)."
+        ),
+    )
 
     alchemy_api_secret_path: str | None = Field(
         default=None,

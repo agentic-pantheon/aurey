@@ -7,7 +7,11 @@ from typing import Any, Literal, TypedDict
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field, ValidationError
 
-from aurey.custody.errors import SecretNotFoundError, SecretStoreUnavailableError
+from aurey.custody.errors import (
+    SecretNotFoundError,
+    SecretStoreUnavailableError,
+    secret_unavailable_graph_details,
+)
 from aurey.graphs.chains import alchemy_rpc_url_for_chain, chain_id_for, chain_info
 from aurey.graphs.ens_eth import (
     ENS_REGISTRY_MAINNET,
@@ -74,11 +78,11 @@ def _alchemy_rpc_or_error(
             message="Alchemy API secret could not be resolved.",
             details={"secret_kind": "alchemy_api"},
         ).model_dump()
-    except SecretStoreUnavailableError:
+    except SecretStoreUnavailableError as exc:
         return None, GraphErrorBody(
             code="secret_unavailable",
             message="Secret store unavailable while resolving Alchemy API key.",
-            details={"secret_kind": "alchemy_api"},
+            details=secret_unavailable_graph_details(secret_kind="alchemy_api", exc=exc),
         ).model_dump()
 
     rpc_url = alchemy_rpc_url_for_chain(chain, alchemy_key)
