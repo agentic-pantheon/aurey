@@ -8,6 +8,7 @@ from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from aurey.graphs.chains import chain_id_for, chain_info
+from aurey.graphs.ens_eth import is_zero_address
 from aurey.graphs.evm_codec import erc20_approve_data, erc20_transfer_data, normalize_evm_address
 from aurey.graphs.results import GraphErrorBody, PreparedTxEnvelope
 from aurey.runtime import AureyRuntime
@@ -132,6 +133,45 @@ def _validate_node(runtime: AureyRuntime, state: TxPrepareGraphState) -> TxPrepa
                 details={"reason": str(exc)},
             ).model_dump()
         }
+
+    if isinstance(parsed, TxPrepareNative):
+        if is_zero_address(parsed.to_address):
+            return {
+                "error": GraphErrorBody(
+                    code="invalid_input",
+                    message="Native transfer recipient must not be the zero address.",
+                ).model_dump()
+            }
+    if isinstance(parsed, TxPrepareErc20Transfer):
+        if is_zero_address(parsed.to_address):
+            return {
+                "error": GraphErrorBody(
+                    code="invalid_input",
+                    message="ERC-20 transfer recipient must not be the zero address.",
+                ).model_dump()
+            }
+        if is_zero_address(parsed.token_address):
+            return {
+                "error": GraphErrorBody(
+                    code="invalid_input",
+                    message="ERC-20 token_address must not be the zero address.",
+                ).model_dump()
+            }
+    if isinstance(parsed, TxPrepareErc20Approval):
+        if is_zero_address(parsed.token_address):
+            return {
+                "error": GraphErrorBody(
+                    code="invalid_input",
+                    message="ERC-20 token_address must not be the zero address.",
+                ).model_dump()
+            }
+        if is_zero_address(parsed.spender_address):
+            return {
+                "error": GraphErrorBody(
+                    code="invalid_input",
+                    message="ERC-20 spender_address must not be the zero address.",
+                ).model_dump()
+            }
 
     return {}
 

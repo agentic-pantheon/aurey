@@ -1092,6 +1092,30 @@ def test_tx_prepare_and_execute_native_roundtrip():
     _assert_no_banned_values(execute)
 
 
+def test_tx_prepare_native_rejects_zero_recipient():
+    signing_path = "vault/signing/local"
+    settings = AureySettings(wallet_signing_key_secret_path=signing_path)
+    runtime = _runtime(
+        secrets={signing_path: "0x" + "ff" * 32},
+        settings=settings,
+        http=ScriptedHttpClient(),
+        rpc_map={},
+    )
+    out = build_tx_prepare_graph(runtime).invoke(
+        {
+            "input": {
+                "kind": "native_transfer",
+                "chain": "base",
+                "from_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "to_address": "0x0000000000000000000000000000000000000000",
+                "value_wei": 100,
+            }
+        }
+    )
+    assert out.get("error") is not None
+    assert out["error"]["message"] == "Native transfer recipient must not be the zero address."
+
+
 def test_tx_prepare_erc20_paths():
     signing_path = "vault/signing/local"
     secrets = {signing_path: "0x" + "ff" * 32}
