@@ -282,6 +282,7 @@ def test_run_prepared_with_oneclaw_signer_broadcast_failed():
 
 def test_simulation_failed_hint_for_erc20_balance_revert():
     from aurey.graphs.evm_tx_pipeline import _simulation_failed
+    from aurey.graphs.results import SimulationFailed
 
     env = PreparedTxEnvelope(
         kind="erc20_transfer",
@@ -294,12 +295,70 @@ def test_simulation_failed_hint_for_erc20_balance_revert():
         nonce=None,
         signing_key_secret_path="vault/signing",
     )
-    err = _simulation_failed(
-        env,
-        Exception("execution reverted: ERC20: transfer amount exceeds balance"),
-        step="gas estimation failed",
+    with pytest.raises(SimulationFailed) as ei:
+        _simulation_failed(
+            env,
+            Exception("execution reverted: ERC20: transfer amount exceeds balance"),
+            step="gas estimation failed",
+        )
+    assert "6 decimals" in str(ei.value).lower() or "10_000" in str(ei.value)
+
+
+def test_lifi_swap_eth_call_includes_transfer_from_diagnostics():
+    from aurey.graphs.results import SimulationFailed
+
+    signer = Account.create()
+    mock_w3 = MagicMock()
+    mock_w3.eth.chain_id = 8453
+    mock_w3.eth.get_transaction_count.return_value = 0
+    mock_w3.eth.estimate_gas.return_value = 500_000
+    mock_w3.eth.max_priority_fee = 1_000_000_000
+    mock_w3.eth.get_block.return_value = {"baseFeePerGas": 2_000_000_000}
+    mock_w3.eth.get_balance.return_value = 10**20
+
+    n = {"i": 0}
+
+    def eth_call_side_effect(_tx: object) -> bytes:
+        n["i"] += 1
+        if n["i"] == 1:
+            raise Exception("execution reverted: TransferHelper: TRANSFER_FROM_FAILED")
+        if n["i"] == 2:
+            return (500_000).to_bytes(32, "big")
+        if n["i"] == 3:
+            return (2_000_000).to_bytes(32, "big")
+        raise AssertionError(f"unexpected eth.call #{n['i']}")
+
+    mock_w3.eth.call.side_effect = eth_call_side_effect
+
+    pipeline = Web3TxPipeline(
+        settings=AureySettings(alchemy_api_secret_path="alchemy/k"),
+        secret_store=FakeSecretStore({"alchemy/k": "test-alchemy-key"}),
+        web3_factory=lambda _u: mock_w3,
+        receipt_timeout_s=5.0,
     )
-    assert "6 decimals" in str(err).lower() or "10_000" in str(err)
+    env = PreparedTxEnvelope(
+        kind="lifi_swap",
+        chain_id=8453,
+        from_address=signer.address,
+        to="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        data="0xcafe",
+        value_hex="0x0",
+        gas_limit_hex=None,
+        nonce=None,
+        signing_key_secret_path="vault/signing",
+        lifi_sell_token="0x1111111111111111111111111111111111111111",
+        lifi_approval_spender="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        lifi_sell_amount_raw="1000000",
+    )
+    with pytest.raises(SimulationFailed) as ei:
+        pipeline.run_prepared(env, signing_key_material_hex="0x" + signer.key.hex())
+    det = ei.value.details
+    assert det is not None
+    assert det["kind"] == "lifi_transfer_from_simulation"
+    assert det["allowance_raw"] == "500000"
+    assert det["balance_raw"] == "2000000"
+    assert det["allowance_covers_quote_amount"] is False
+    assert det["balance_covers_quote_amount"] is True
 
     signer = Account.create()
     pipeline = Web3TxPipeline(

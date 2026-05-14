@@ -9,7 +9,7 @@ from aurey.graphs.evm_codec import (
     normalize_evm_address,
     parse_evm_uint,
 )
-from aurey.graphs.results import EnvelopeSigningMode, PreparedTxEnvelope
+from aurey.graphs.results import EnvelopeSigningMode, LiFiAllowanceContext, PreparedTxEnvelope
 
 
 def lifi_transaction_request_to_envelope(
@@ -19,6 +19,7 @@ def lifi_transaction_request_to_envelope(
     transaction_request: dict[str, Any],
     signing_key_secret_path: str | None = None,
     signing_mode: EnvelopeSigningMode = "vault_key",
+    allowance_context: LiFiAllowanceContext | None = None,
 ) -> PreparedTxEnvelope:
     """Normalize an ethers-style tx request from LiFi into our execute envelope.
 
@@ -27,6 +28,9 @@ def lifi_transaction_request_to_envelope(
     For ``vault_key``, ``signing_key_secret_path`` is required downstream. For ``oneclaw_intents``,
     leave it unset to use 1Claw agent defaults, or set it to the same vault path as
     ``AUREY_WALLET_SIGNING_KEY_SECRET_PATH`` so 1Claw receives an explicit ``signing_key_path``.
+
+    Optional ``allowance_context`` (from ``swap_prepare``) attaches sell token + spender metadata for
+    richer simulation error diagnostics.
     """
 
     tr = transaction_request
@@ -89,6 +93,12 @@ def lifi_transaction_request_to_envelope(
         o = (signing_key_secret_path or "").strip()
         secret_path = o or None
 
+    sell_token = approval_spender = sell_amt = None
+    if allowance_context is not None:
+        sell_token = allowance_context.token_address
+        approval_spender = allowance_context.spender_address
+        sell_amt = allowance_context.amount_raw
+
     return PreparedTxEnvelope(
         kind="lifi_swap",
         chain_id=chain_id,
@@ -100,4 +110,7 @@ def lifi_transaction_request_to_envelope(
         nonce=nonce,
         signing_mode=signing_mode,
         signing_key_secret_path=secret_path,
+        lifi_sell_token=sell_token,
+        lifi_approval_spender=approval_spender,
+        lifi_sell_amount_raw=sell_amt,
     )

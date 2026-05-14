@@ -63,10 +63,11 @@ def _pipeline_runtime_error_response(exc: RuntimeError) -> dict[str, Any]:
         code = "broadcast_failed"
     else:
         code = "simulation_failed"
+    details = getattr(exc, "details", None)
     return GraphErrorBody(
         code=code,
         message=message,
-        details=None,
+        details=details if isinstance(details, dict) else None,
     ).model_dump()
 
 

@@ -78,6 +78,43 @@
     "title": "AlchemyTransferHistoryArgs",
     "type": "object"
   },
+  "compute_token_amount_from_usd": {
+    "description": "Map a USD sell notional to ERC-20 raw units (Alchemy price + on-chain ``decimals``).",
+    "properties": {
+      "chain": {
+        "description": "Chain slug where the token and wallet live.",
+        "minLength": 1,
+        "title": "Chain",
+        "type": "string"
+      },
+      "token_address": {
+        "description": "Sell token contract (0x).",
+        "minLength": 1,
+        "title": "Token Address",
+        "type": "string"
+      },
+      "usd_notional": {
+        "description": "USD notional as decimal text (e.g. \"5\" or \"12.34\").",
+        "minLength": 1,
+        "title": "Usd Notional",
+        "type": "string"
+      },
+      "wallet_address": {
+        "description": "Wallet for price API context and optional balance check.",
+        "minLength": 1,
+        "title": "Wallet Address",
+        "type": "string"
+      }
+    },
+    "required": [
+      "chain",
+      "wallet_address",
+      "token_address",
+      "usd_notional"
+    ],
+    "title": "ComputeTokenAmountFromUsdArgs",
+    "type": "object"
+  },
   "earn_get_vault": {
     "additionalProperties": false,
     "description": "Fetch one Earn vault by chain + contract; use before ``earn_prepare_deposit`` to validate metadata.",
@@ -682,7 +719,7 @@
         "type": "string"
       },
       "from_asset": {
-        "description": "Token contract (0x…) or symbol as accepted by LiFi ``fromToken``. Phrases like «native ETH» on the **from_chain** map to wrapped native on that chain.",
+        "description": "Token contract (0x\u2026) or symbol as accepted by LiFi ``fromToken``. Phrases like \u00abnative ETH\u00bb map to wrapped native on that chain.",
         "minLength": 1,
         "title": "From Asset",
         "type": "string"
@@ -731,7 +768,7 @@
         "type": "string"
       },
       "to_asset": {
-        "description": "Token contract (0x…) or symbol as accepted by LiFi ``toToken``. Phrases like «native ETH» on the **to_chain** are rewritten to that chain's wrapped native (e.g. Base WETH) because LiFi requires an ERC-20 ``toToken``.",
+        "description": "Token contract (0x\u2026) or symbol as accepted by LiFi ``toToken``. Phrases like \u00abnative ETH\u00bb on the **to_chain** are rewritten to that chain's wrapped native (e.g. Base WETH) because LiFi requires an ERC-20 ``toToken``.",
         "minLength": 1,
         "title": "To Asset",
         "type": "string"
@@ -806,7 +843,7 @@
     "description": "Prepare ERC-20 ``approve`` for DEX/spenders (e.g. before LiFi swaps).",
     "properties": {
       "amount_wei": {
-        "description": "Token amount in the contract's smallest units (not necessarily 1e18). Lookup token decimals: USDC on Base/Ethereum uses **6** — e.g. 0.01 USDC = **10_000**, 1 USDC = **1_000_000**. WETH uses 18. Do not scale USDC by 10**18.",
+        "description": "Token amount in the contract's smallest units (not necessarily 1e18). Lookup token decimals: USDC on Base/Ethereum uses **6** \u2014 e.g. 0.01 USDC = **10_000**, 1 USDC = **1_000_000**. WETH uses 18. Do not scale USDC by 10**18.",
         "minimum": 0,
         "title": "Amount Wei",
         "type": "integer"
@@ -848,7 +885,7 @@
     "description": "Prepare ERC-20 transfer; RPC from Alchemy path if configured.",
     "properties": {
       "amount_wei": {
-        "description": "Token amount in the contract's smallest units (not necessarily 1e18). Lookup token decimals: USDC on Base/Ethereum uses **6** — e.g. 0.01 USDC = **10_000**, 1 USDC = **1_000_000**. WETH uses 18. Do not scale USDC by 10**18.",
+        "description": "Token amount in the contract's smallest units (not necessarily 1e18). Lookup token decimals: USDC on Base/Ethereum uses **6** \u2014 e.g. 0.01 USDC = **10_000**, 1 USDC = **1_000_000**. WETH uses 18. Do not scale USDC by 10**18.",
         "minimum": 0,
         "title": "Amount Wei",
         "type": "integer"
@@ -887,8 +924,75 @@
     "type": "object"
   },
   "tx_prepare_lifi_swap": {
+    "$defs": {
+      "LiFiAllowanceContext": {
+        "description": "On-chain allowance snapshot for the LiFi route's sell token and approval spender.\n\nAlways populated when LiFi returns an ERC-20 ``fromToken`` and ``approvalAddress``, even if\n``allowance`` is omitted because the wallet already had enough allowance at prepare time.",
+        "properties": {
+          "allowance_sufficient": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "True iff ``current_allowance_raw`` was read and is >= ``amount_raw``.",
+            "title": "Allowance Sufficient"
+          },
+          "amount_raw": {
+            "description": "LiFi route sell amount in raw units (same as ``allowance.amount_raw`` when set).",
+            "pattern": "^[0-9]+$",
+            "title": "Amount Raw",
+            "type": "string"
+          },
+          "current_allowance_raw": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "``allowance(owner, spender)`` at prepare time when Alchemy read succeeded.",
+            "title": "Current Allowance Raw"
+          },
+          "spender_address": {
+            "title": "Spender Address",
+            "type": "string"
+          },
+          "token_address": {
+            "title": "Token Address",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token_address",
+          "spender_address",
+          "amount_raw"
+        ],
+        "title": "LiFiAllowanceContext",
+        "type": "object"
+      }
+    },
     "description": "Build executable swap wiring from ``swap_prepare``; prefers ``prepared_id`` so calldata stays server-side (1Claw signing after prepare).",
     "properties": {
+      "allowance_context": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/LiFiAllowanceContext"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "Optional: ERC-20 allowance context from ``swap_prepare`` / ``earn_prepare_deposit`` (pass through verbatim)."
+      },
       "chain": {
         "description": "Chain slug for the LiFi step.",
         "minLength": 1,

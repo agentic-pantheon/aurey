@@ -11,7 +11,7 @@ from pydantic import AliasChoices, BaseModel, Field, ValidationError, model_vali
 from aurey.graphs.chains import chain_id_for, chain_info
 from aurey.graphs.evm_codec import normalize_evm_address
 from aurey.graphs.lifi_envelope import lifi_transaction_request_to_envelope
-from aurey.graphs.results import GraphErrorBody, LiFiPreparedTx
+from aurey.graphs.results import GraphErrorBody, LiFiAllowanceContext, LiFiPreparedTx
 from aurey.graphs.swap_diag import SWAP_LOG, addr_short
 from aurey.graphs.tx_prepare import _evm_prepare_signing_settings_error, _prepared_tx_signing_kwargs
 from aurey.runtime import AureyRuntime
@@ -47,6 +47,13 @@ class TxPrepareLiFiInput(BaseModel):
         default=None,
         description="LiFi transactionRequest dict; pair with `route_id` if no `prepared`.",
         validation_alias=AliasChoices("transaction_request", "transactionRequest"),
+    )
+    allowance_context: LiFiAllowanceContext | None = Field(
+        default=None,
+        description=(
+            "Optional: ERC-20 allowance context from ``swap_prepare`` / ``earn_prepare_deposit`` "
+            "(pass through verbatim)."
+        ),
     )
 
     @model_validator(mode="after")
@@ -156,6 +163,7 @@ def _execute_node(runtime: AureyRuntime, state: TxPrepareLiFiGraphState) -> TxPr
             transaction_request=dict(prepared.transaction_request),
             signing_mode=signing["signing_mode"],
             signing_key_secret_path=signing["signing_key_secret_path"],
+            allowance_context=parsed.allowance_context,
         )
     except ValueError as exc:
         SWAP_LOG.info(
