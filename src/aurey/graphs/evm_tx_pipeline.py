@@ -16,13 +16,99 @@ from aurey.custody import OneClawEvmTransactionSigner
 from aurey.custody.errors import SecretNotFoundError, SecretStoreUnavailableError
 from aurey.custody.secret_store import SecretStore
 from aurey.graphs.chains import alchemy_rpc_url_for_chain, chain_name_for_id
-from aurey.graphs.evm_codec import normalize_contract_calldata
+from aurey.graphs.evm_codec import (
+    erc20_allowance_calldata,
+    erc20_balance_of_calldata,
+    normalize_contract_calldata,
+)
 from aurey.graphs.ports import TxPipelinePort
-from aurey.graphs.results import PreparedTxEnvelope, TxExecuteResult, TxReceiptSummary
+from aurey.graphs.results import (
+    PreparedTxEnvelope,
+    SimulationFailed,
+    TxExecuteResult,
+    TxReceiptSummary,
+)
 from aurey.graphs.swap_diag import SWAP_LOG, addr_short
 from aurey.settings import AureySettings
 
 _PRIVATE_KEY_HEX = re.compile(r"^(?:0x)?[a-fA-F0-9]{64}$")
+
+
+def _lifi_swap_simulation_hint_suffix(exc: BaseException) -> str:
+    low = str(exc).lower()
+    if "revert" in low or "execution reverted" in low:
+        return (
+            " Hint: For ERC-20 sells, ensure allowance: call swap_prepare and use "
+            "`allowance` → tx_prepare_erc20_approval → tx_execute, then run the swap tx "
+            "(refresh quote if the first swap simulation fails after approval). "
+            "See `error.details` when present for on-chain allowance/balance vs the quoted sell amount."
+        )
+    if "hex" in low or "hex string" in low:
+        return (
+            " Hint: Calldata/value shape may be invalid. Re-run `swap_prepare`, then "
+            "`tx_prepare_lifi_swap` with fresh `prepared`; do not pass truncated JSON or "
+            "a lone `idempotency_key` to `tx_execute`."
+        )
+    return ""
+
+
+def _transfer_from_revert_heuristic(exc: BaseException) -> bool:
+    low = str(exc).lower()
+    return (
+        "transfer_from" in low
+        or "transferfrom" in low
+        or "transfer helper" in low
+        or "safeerc20" in low
+        or "ds-math-sub-underflow" in low
+    )
+
+
+def _lifi_transfer_from_simulation_details(
+    envelope: PreparedTxEnvelope,
+    *,
+    w3: Web3,
+    from_cs: str,
+) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "kind": "lifi_transfer_from_simulation",
+        "swap_tx_to": envelope.to,
+    }
+    sell = envelope.lifi_sell_token
+    spender = envelope.lifi_approval_spender
+    if not sell or not spender:
+        details["note"] = (
+            "Envelope lacks LiFi sell-token metadata (prepare via swap_prepare / earn_prepare_deposit "
+            "so allowance_context is attached)."
+        )
+        return details
+    try:
+        token_cs = Web3.to_checksum_address(sell)
+        owner_cs = Web3.to_checksum_address(from_cs)
+        spender_cs = Web3.to_checksum_address(spender)
+        ald = erc20_allowance_calldata(owner_cs, spender_cs)
+        bald = erc20_balance_of_calldata(owner_cs)
+        allow_out = w3.eth.call({"to": token_cs, "data": ald})
+        bal_out = w3.eth.call({"to": token_cs, "data": bald})
+        allow_raw = int.from_bytes(allow_out, "big")
+        bal_raw = int.from_bytes(bal_out, "big")
+        quote_amt = envelope.lifi_sell_amount_raw or ""
+        details.update(
+            {
+                "sell_token": sell,
+                "lifi_approval_spender": spender,
+                "wallet": envelope.from_address,
+                "balance_raw": str(bal_raw),
+                "allowance_raw": str(allow_raw),
+                "quote_sell_amount_raw": envelope.lifi_sell_amount_raw,
+            }
+        )
+        if quote_amt.isdigit():
+            rq = int(quote_amt)
+            details["allowance_covers_quote_amount"] = allow_raw >= rq
+            details["balance_covers_quote_amount"] = bal_raw >= rq
+    except Exception as diag_exc:
+        details["onchain_read_error"] = " ".join(str(diag_exc).split())[:240]
+    return details
 
 
 def _simulation_failed(
@@ -30,7 +116,7 @@ def _simulation_failed(
     exc: BaseException,
     *,
     step: str,
-) -> RuntimeError:
+) -> None:
     msg = f"simulation_failed: {step} ({exc})"
     if envelope.kind in ("erc20_transfer", "erc20_approval"):
         low = str(exc).lower()
@@ -41,20 +127,8 @@ def _simulation_failed(
                 "mints a huge transfer and reverts with 'exceeds balance'."
             )
     elif envelope.kind == "lifi_swap":
-        low = str(exc).lower()
-        if "revert" in low or "execution reverted" in low:
-            msg += (
-                " Hint: For ERC-20 sells, ensure allowance: call swap_prepare and use "
-                "`allowance` → tx_prepare_erc20_approval → tx_execute, then run the swap tx "
-                "(refresh quote if the first swap simulation fails after approval)."
-            )
-        elif "hex" in low or "hex string" in low:
-            msg += (
-                " Hint: Calldata/value shape may be invalid. Re-run `swap_prepare`, then "
-                "`tx_prepare_lifi_swap` with fresh `prepared`; do not pass truncated JSON or "
-                "a lone `idempotency_key` to `tx_execute`."
-            )
-    return RuntimeError(msg)
+        msg += _lifi_swap_simulation_hint_suffix(exc)
+    raise SimulationFailed(msg) from exc
 
 
 @dataclass(frozen=True)
@@ -182,7 +256,7 @@ class Web3TxPipeline(TxPipelinePort):
             try:
                 gas_limit = int(w3.eth.estimate_gas(base))
             except Exception as exc:
-                raise _simulation_failed(envelope, exc, step="gas estimation failed") from exc
+                _simulation_failed(envelope, exc, step="gas estimation failed")
 
         mark("gas_ready", gas_limit=gas_limit)
 
@@ -200,7 +274,15 @@ class Web3TxPipeline(TxPipelinePort):
         try:
             w3.eth.call(tx_body)
         except Exception as exc:
-            raise _simulation_failed(envelope, exc, step="eth_call simulation failed") from exc
+            msg = f"simulation_failed: eth_call simulation failed ({exc})"
+            details = None
+            if envelope.kind == "lifi_swap":
+                msg += _lifi_swap_simulation_hint_suffix(exc)
+                if _transfer_from_revert_heuristic(exc):
+                    details = _lifi_transfer_from_simulation_details(
+                        envelope, w3=w3, from_cs=from_cs
+                    )
+            raise SimulationFailed(msg, details=details) from exc
 
         mark("simulation_ok")
 

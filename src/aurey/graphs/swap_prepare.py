@@ -25,6 +25,7 @@ from aurey.graphs.ports import HttpJsonRequestError
 from aurey.graphs.read import _alchemy_rpc_or_error
 from aurey.graphs.results import (
     GraphErrorBody,
+    LiFiAllowanceContext,
     LiFiAllowanceHint,
     LiFiPreparedTx,
     SwapPrepareResult,
@@ -341,23 +342,28 @@ def _onchain_allowance_for_hint(
         return None
 
 
-def _allowance_hint_after_onchain_check(
+def _allowance_context_and_actionable_hint(
     runtime: AureyRuntime,
     chain: str,
     owner: str,
     hint: LiFiAllowanceHint | None,
-) -> LiFiAllowanceHint | None:
-    """Omit the approve hint when the wallet already has enough allowance."""
+) -> tuple[LiFiAllowanceContext | None, LiFiAllowanceHint | None]:
+    """Build always-on allowance context; omit actionable ``allowance`` only when on-chain is enough."""
 
     if hint is None:
-        return None
+        return None, None
     required = int(hint.amount_raw)
     current = _onchain_allowance_for_hint(runtime, chain, owner, hint)
-    if current is None:
-        return hint
-    if current >= required:
-        return None
-    return hint
+    ctx = LiFiAllowanceContext(
+        token_address=hint.token_address,
+        spender_address=hint.spender_address,
+        amount_raw=hint.amount_raw,
+        current_allowance_raw=str(current) if current is not None else None,
+        allowance_sufficient=(current >= required) if current is not None else None,
+    )
+    if current is not None and current >= required:
+        return ctx, None
+    return ctx, hint
 
 
 def _execute_node(runtime: AureyRuntime, state: SwapGraphState) -> SwapGraphState:
@@ -435,7 +441,7 @@ def _execute_node(runtime: AureyRuntime, state: SwapGraphState) -> SwapGraphStat
         owner = normalize_evm_address(parsed.from_address)
         t_allow = time.perf_counter()
         try:
-            hint = _allowance_hint_after_onchain_check(
+            al_ctx, hint = _allowance_context_and_actionable_hint(
                 runtime,
                 parsed.from_chain.strip().lower(),
                 owner,
@@ -443,7 +449,9 @@ def _execute_node(runtime: AureyRuntime, state: SwapGraphState) -> SwapGraphStat
             )
         finally:
             allowance_phase_ms = (time.perf_counter() - t_allow) * 1000
-        result = SwapPrepareResult(prepared=prepared, allowance=hint)
+        result = SwapPrepareResult(
+            prepared=prepared, allowance=hint, allowance_context=al_ctx
+        )
         total_ms = (time.perf_counter() - t_wall) * 1000
         SWAP_LOG.info(
             "swap_prepare_graph ok route_id=%s lifi_http_ms=%.1f allowance_phase_ms=%.1f "

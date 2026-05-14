@@ -134,12 +134,47 @@ class LiFiAllowanceHint(BaseModel):
     )
 
 
+class LiFiAllowanceContext(BaseModel):
+    """On-chain allowance snapshot for the LiFi route's sell token and approval spender.
+
+    Always populated when LiFi returns an ERC-20 ``fromToken`` and ``approvalAddress``, even if
+    ``allowance`` is omitted because the wallet already had enough allowance at prepare time.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    token_address: str
+    spender_address: str
+    amount_raw: str = Field(
+        description="LiFi route sell amount in raw units (same as ``allowance.amount_raw`` when set).",
+        pattern=r"^[0-9]+$",
+    )
+    current_allowance_raw: str | None = Field(
+        default=None,
+        description="``allowance(owner, spender)`` at prepare time when Alchemy read succeeded.",
+        pattern=r"^[0-9]+$",
+    )
+    allowance_sufficient: bool | None = Field(
+        default=None,
+        description="True iff ``current_allowance_raw`` was read and is >= ``amount_raw``.",
+    )
+
+
+class SimulationFailed(RuntimeError):
+    """Local gas/eth_call simulation failed; optional structured details for agents."""
+
+    def __init__(self, message: str, *, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.details = details
+
+
 class SwapPrepareResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     provider: Literal["lifi"] = "lifi"
     prepared: LiFiPreparedTx
     allowance: LiFiAllowanceHint | None = None
+    allowance_context: LiFiAllowanceContext | None = None
 
 
 TxKind = Literal["native_transfer", "erc20_transfer", "erc20_approval", "lifi_swap"]
@@ -167,6 +202,9 @@ class PreparedTxEnvelope(BaseModel):
     nonce: int | None = None
     signing_mode: EnvelopeSigningMode = "vault_key"
     signing_key_secret_path: str | None = None
+    lifi_sell_token: str | None = None
+    lifi_approval_spender: str | None = None
+    lifi_sell_amount_raw: str | None = None
 
     @model_validator(mode="after")
     def _enforce_signing_mode_secret_path_rules(self) -> Self:

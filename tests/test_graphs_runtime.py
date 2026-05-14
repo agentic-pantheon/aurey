@@ -601,6 +601,13 @@ def test_swap_prepare_graph():
     assert al["token_address"] == "0x1111111111111111111111111111111111111111"
     assert al["spender_address"] == "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     assert al["amount_raw"] == "1000000"
+    ctx = out["result"]["allowance_context"]
+    assert ctx is not None
+    assert ctx["token_address"] == al["token_address"]
+    assert ctx["spender_address"] == al["spender_address"]
+    assert ctx["amount_raw"] == "1000000"
+    assert ctx["current_allowance_raw"] is None
+    assert ctx["allowance_sufficient"] is None
     _assert_no_banned_values(out)
 
 
@@ -759,6 +766,10 @@ def test_swap_prepare_graph_skips_allowance_hint_when_on_chain_sufficient():
     )
     assert out["result"]["prepared"]["route_id"] == "swap-route-allow"
     assert out["result"].get("allowance") is None
+    ctx = out["result"]["allowance_context"]
+    assert ctx is not None
+    assert ctx["allowance_sufficient"] is True
+    assert ctx["current_allowance_raw"] == "1000000"
     _assert_no_banned_values(out)
 
 
@@ -817,6 +828,10 @@ def test_swap_prepare_graph_keeps_allowance_hint_when_on_chain_low():
     al = out["result"]["allowance"]
     assert al is not None
     assert al["amount_raw"] == "1000000"
+    ctx = out["result"]["allowance_context"]
+    assert ctx is not None
+    assert ctx["allowance_sufficient"] is False
+    assert ctx["current_allowance_raw"] == "100"
     _assert_no_banned_values(out)
 
 
@@ -865,6 +880,7 @@ def test_swap_prepare_graph_without_lifi_api_key():
     )
     assert out["result"]["prepared"]["route_id"] == "public-quote"
     assert out["result"].get("allowance") is None
+    assert out["result"].get("allowance_context") is None
 
 
 def test_swap_prepare_graph_maps_lifi_http_json_errors():
@@ -931,6 +947,49 @@ def test_tx_prepare_lifi_swap_graph():
     assert env["gas_limit_hex"] == "0x5208"
     assert env["signing_key_secret_path"] == signing_path
     assert env["signing_mode"] == "vault_key"
+    assert env.get("lifi_sell_token") is None
+    _assert_no_banned_values(out)
+
+
+def test_tx_prepare_lifi_swap_graph_attaches_allowance_context_metadata():
+    signing_path = "vault/signing/local"
+    secrets = {signing_path: "0x" + "ff" * 32}
+    settings = AureySettings(wallet_signing_key_secret_path=signing_path)
+    runtime = _runtime(secrets=secrets, settings=settings, http=ScriptedHttpClient(), rpc_map={})
+    wallet = "0xc1923710468607b8b7db38a6afbb9b432744390c"
+    prepared = {
+        "route_id": "4026c5d3-23c3-494d-8c1e-b1c9ba89657c:0",
+        "transaction_request": {
+            "to": "0x1234567890123456789012345678901234567890",
+            "data": "0xcafe",
+            "value": "0x0",
+            "chainId": 8453,
+            "from": wallet,
+            "gasLimit": "0x5208",
+        },
+    }
+    ctx = {
+        "token_address": "0x1111111111111111111111111111111111111111",
+        "spender_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "amount_raw": "1000000",
+        "current_allowance_raw": "2000000",
+        "allowance_sufficient": True,
+    }
+    out = build_tx_prepare_lifi_graph(runtime).invoke(
+        {
+            "input": {
+                "chain": "base",
+                "from_address": wallet,
+                "prepared": prepared,
+                "allowance_context": ctx,
+            }
+        }
+    )
+    assert out.get("error") is None
+    env = out["result"]["envelope"]
+    assert env["lifi_sell_token"] == "0x1111111111111111111111111111111111111111"
+    assert env["lifi_approval_spender"] == "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    assert env["lifi_sell_amount_raw"] == "1000000"
     _assert_no_banned_values(out)
 
 

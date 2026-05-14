@@ -51,6 +51,12 @@ def erc20_allowance_calldata(owner: str, spender: str) -> str:
     return "0xdd62ed3e" + _pad_addr(owner) + _pad_addr(spender)
 
 
+def erc20_balance_of_calldata(owner: str) -> str:
+    """ERC-20 ``balanceOf(address)`` — selector keccak256(...)[:4]."""
+
+    return "0x70a08231" + _pad_addr(owner)
+
+
 # ERC-20 `decimals()` selector — keccak256("decimals()")[:4]
 ERC20_DECIMALS_CALLDATA = "0x313ce567"
 
