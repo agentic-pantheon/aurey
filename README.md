@@ -1,7 +1,7 @@
 # Aurey
 > **Production-grade EVM agentic wallet. Powered by LangGraph and 1Claw.**
 <p align="center">
-  <img src="asset/1.png" alt="Aurey — EVM agentic wallet secured with 1Claw" />
+  <img src="asset/aurey-wordmark.png" alt="Aurey" width="260" />
 </p>
 
 
@@ -103,15 +103,13 @@ Smoke `**GET /health**`, then call `**POST /v1/invoke**` with JSON: `message`, `
 
 ## 🎬 Demo
 
-> **[ Add your walkthrough embed here ]**
+<p align="center">
+  <a href="https://youtu.be/3AVGVJ9BWfQ" title="Watch the Aurey demo on YouTube">
+    <img src="https://img.youtube.com/vi/3AVGVJ9BWfQ/maxresdefault.jpg" alt="Aurey demo — play on YouTube" width="560" />
+  </a>
+</p>
 
-```html
-<!-- Example: paste a Loom or YouTube iframe below -->
-<!--
-<iframe ... src="https://www.loom.com/embed/VIDEO_ID"></iframe>
--->
-```
-
+**[Watch on YouTube →](https://youtu.be/3AVGVJ9BWfQ)**
 
 ---
 
