@@ -45,11 +45,18 @@ class SwapPrepareInput(BaseModel):
     to_chain: str = Field(min_length=1, description="Destination chain slug.")
     from_asset: str = Field(
         min_length=1,
-        description="Token contract (0x…) or symbol as accepted by LiFi ``fromToken``.",
+        description=(
+            "Token contract (0x…) or symbol as accepted by LiFi ``fromToken``. "
+            "Phrases like «native ETH» map to wrapped native on that chain."
+        ),
     )
     to_asset: str = Field(
         min_length=1,
-        description="Token contract (0x…) or symbol as accepted by LiFi ``toToken``.",
+        description=(
+            "Token contract (0x…) or symbol as accepted by LiFi ``toToken``. "
+            "Phrases like «native ETH» on the **to_chain** are rewritten to that chain's wrapped "
+            "native (e.g. Base WETH) because LiFi requires an ERC-20 ``toToken``."
+        ),
     )
     from_amount_wei: str = Field(min_length=1, pattern=r"^[0-9]+$")
     from_address: str = Field(min_length=1)
@@ -153,6 +160,59 @@ def _normalize_lifi_token_param(value: str) -> str:
     return raw
 
 
+def _collapse_token_phrase(text: str) -> str:
+    s = text.strip().lower()
+    for c in "\u2018\u2019":  # unicode apostrophes
+        s = s.replace(c, " ")
+    s = s.replace("'", " ")
+    return " ".join(s.split())
+
+
+# Common "wrapped Ether" used as LiFi ERC-20 when the user asks for chain native ETH.
+_WRAPPED_ETH_BY_CHAIN_SLUG: dict[str, str] = {
+    "arbitrum": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+    "avalanche": "0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB",
+    "base": "0x4200000000000000000000000000000000000006",
+    "bsc": "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
+    "ethereum": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "gnosis": "0x6A023CCd1ff6F2045C3309768eAdE5d18d9f7f4b",
+    "linea": "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf347",
+    "polygon": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+    "scroll": "0x5300000000000000000000000000000000000004",
+}
+
+
+def _means_native_eth_intent(text: str) -> bool:
+    """True for natural-language «native ETH» labels models often pass instead of WETH/0x."""
+
+    raw = text.strip()
+    low = raw.lower()
+    if low.startswith("0x") and len(low) == 42:
+        return False
+    tokens = _collapse_token_phrase(raw).split()
+    if not tokens:
+        return False
+    if "weth" in tokens:
+        return False
+    if "native" not in tokens:
+        return False
+    return ("eth" in tokens) or ("ether" in tokens) or ("ethereum" in tokens)
+
+
+def _resolve_lifi_token_param(value: str, *, for_chain: str) -> str:
+    """Apply ``fromToken`` / ``toToken`` normalization; map native-ETH phrasing to wrapped ETH."""
+
+    raw = value.strip()
+    if _means_native_eth_intent(raw):
+        slug = for_chain.strip().lower()
+        wrapped = _WRAPPED_ETH_BY_CHAIN_SLUG.get(slug)
+        if wrapped is not None:
+            return normalize_evm_address(wrapped)
+        # LiFi expects an address or known symbol — prefer canonical WETH ticker when unmapped.
+        return "WETH"
+    return _normalize_lifi_token_param(raw)
+
+
 def _lifi_quote_query_params(
     *,
     parsed: SwapPrepareInput,
@@ -165,8 +225,8 @@ def _lifi_quote_query_params(
     params: dict[str, str] = {
         "fromChain": str(from_cid),
         "toChain": str(to_cid),
-        "fromToken": _normalize_lifi_token_param(parsed.from_asset),
-        "toToken": _normalize_lifi_token_param(parsed.to_asset),
+        "fromToken": _resolve_lifi_token_param(parsed.from_asset, for_chain=parsed.from_chain),
+        "toToken": _resolve_lifi_token_param(parsed.to_asset, for_chain=parsed.to_chain),
         "fromAmount": str(parsed.from_amount_wei),
         "fromAddress": normalize_evm_address(parsed.from_address),
         "toAddress": normalize_evm_address(parsed.to_address),

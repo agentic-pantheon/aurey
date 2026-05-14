@@ -654,6 +654,53 @@ def test_swap_prepare_graph_quote_url_includes_slippage_order_integrator():
     _assert_no_banned_values(out)
 
 
+def test_swap_prepare_graph_maps_native_eth_phrase_to_wrapped_weth():
+    """Models paste «native ETH» as toToken — rewrite to that chain's WETH contract for LiFi."""
+
+    settings = AureySettings(lifi_api_secret_path=None)
+    urls: list[str] = []
+
+    def capture_url(**kw: object) -> bool:
+        urls.append(str(kw.get("url") or ""))
+        return kw.get("method") == "GET" and "/v1/quote?" in str(kw.get("url") or "")
+
+    http = ScriptedHttpClient(
+        [
+            (
+                capture_url,
+                {
+                    "id": "q-native-eth",
+                    "transactionRequest": {
+                        "to": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "data": "0x",
+                    },
+                },
+            )
+        ]
+    )
+    runtime = _runtime(secrets={}, settings=settings, http=http, rpc_map={})
+    out = build_swap_prepare_graph(runtime).invoke(
+        {
+            "input": {
+                "from_chain": "base",
+                "to_chain": "base",
+                "from_asset": "0x0555E30da8f98308eDb960AA94C0Db47230d2b9c",
+                "to_asset": "native ETH",
+                "from_amount_wei": "5000000000000000000",
+                "from_address": "0xc1923710468607b8b7db38a6afbb9b432744390c",
+                "to_address": "0xc1923710468607b8b7db38a6afbb9b432744390c",
+            }
+        }
+    )
+    assert out.get("error") is None
+    assert len(urls) == 1
+    assert (
+        "toToken=0x4200000000000000000000000000000000000006" in urls[0]
+        or "toToken=0x4200000000000000000000000000000000000006".upper() in urls[0].upper()
+    )
+    _assert_no_banned_values(out)
+
+
 def test_swap_prepare_graph_skips_allowance_hint_when_on_chain_sufficient():
     """When Alchemy-backed allowance is already >= LiFi fromAmount, omit approve hint."""
 

@@ -836,6 +836,11 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
         a decimal fraction (e.g. ``0.005`` = 0.5%%). Optional ``order`` is ``FASTEST`` or
         ``CHEAPEST``. Prefer **checksum** ``0x`` token addresses when possible.
 
+        For **native ETH** on an EVM chain, LiFi expects the wrapped native token (WETH). If
+        ``from_asset`` / ``to_asset`` contain natural-language native-ETH phrases (e.g. ``native ETH``),
+        Aurey maps them to wrapped native for the relevant **from** / **to** chain before calling LiFi
+        (so the model should not leave quotes as ``toToken``).
+
         On success, call ``tx_execute(prepared_id=result['prepared_id'])``. The full LiFi
         transaction request is stored server-side so the model does not need to copy calldata.
 
