@@ -583,7 +583,10 @@ def build_aurey_subgraph_tools(runtime: AureyRuntime) -> list[BaseTool]:
 
     @tool(args_schema=ResolveKnownAddressArgs)
     def resolve_known_address(chain: str, known_ticker: str) -> dict[str, Any]:
-        """Map a bundled ticker (e.g. USDC) to contract metadata; offline ``known_addresses.json`` (does not call Alchemy)."""
+        """Map a bundled ticker (e.g. USDC) to contract metadata from ``known_addresses.json``.
+
+        Call this **before** stating or using a ``0x`` for a named symbol on a chain; do not
+        guess addresses. Offline lookup (does not call Alchemy)."""
         payload = ResolveKnownAddressArgs(chain=chain, known_ticker=known_ticker)
         graph_in = ReadGraphInput(
             operation="known_address",
